@@ -1,0 +1,639 @@
+// CrossclimbSolver - Core Solver Logic
+// Orchestrates reading clues, matching answers, typing, and reordering
+
+const Solver = {
+  // Configurable selectors — updated after DOM inspection
+  selectors: {
+    // Game container
+    gameContainer: null,
+    // Individual puzzle rows (should match 7 elements)
+    puzzleRow: null,
+    // Clue text within a row
+    clueText: null,
+    // Letter cells within a row (individual letter boxes)
+    letterCell: null,
+    // Lock indicator on a row
+    lockIndicator: null,
+    // Drag handle or draggable element within a row
+    dragHandle: null,
+    // Virtual keyboard container
+    keyboard: null,
+    // Individual keyboard key buttons
+    keyButton: null,
+  },
+
+  // State
+  state: {
+    puzzleData: null,       // Parsed answer data from crossclimbanswer.io
+    gameRows: [],           // DOM elements for each row
+    clueMap: new Map(),     // Clue text -> row element
+    currentPhase: 'idle',   // idle | inspecting | fetching | solving | reordering | finalizing | done
+    log: [],
+  },
+
+  // ----- MAIN SOLVE FLOW -----
+
+  async solve(puzzleData, callbacks = {}) {
+    const { onStatus, onLog, onError, onComplete } = callbacks;
+
+    const log = (msg) => {
+      this.state.log.push(msg);
+      console.log(`[CrossclimbSolver] ${msg}`);
+      onLog?.(msg);
+    };
+
+    const status = (phase, msg) => {
+      this.state.currentPhase = phase;
+      log(`[${phase}] ${msg}`);
+      onStatus?.(phase, msg);
+    };
+
+    try {
+      this.state.puzzleData = puzzleData;
+
+      // Step 1: Discover the DOM structure
+      status('inspecting', 'Inspecting puzzle DOM...');
+      const domInfo = await this._discoverDOM();
+      log(`Found ${domInfo.rows.length} puzzle rows`);
+
+      if (domInfo.rows.length === 0) {
+        throw new Error('Could not find puzzle rows in the DOM. Run DOMInspector.inspect() in the console for details.');
+      }
+
+      // Step 2: Read clues from the DOM
+      status('reading', 'Reading clues from puzzle...');
+      const clues = this._readClues(domInfo);
+      log(`Read ${clues.length} clues: ${clues.map(c => c.text.substring(0, 30) + '...').join(', ')}`);
+
+      // Step 3: Match clues to answers
+      status('matching', 'Matching clues to answers...');
+      const matches = this._matchCluesToAnswers(clues, puzzleData);
+      log(`Matched ${matches.length} clue-answer pairs`);
+
+      for (const match of matches) {
+        log(`  "${match.clue.substring(0, 40)}..." → ${match.answer}`);
+      }
+
+      // Step 4: Type answers into each row
+      status('solving', 'Typing answers...');
+      for (let i = 0; i < matches.length; i++) {
+        const match = matches[i];
+        status('solving', `Typing "${match.answer}" (${i + 1}/${matches.length})...`);
+        await this._typeAnswer(match.rowElement, match.answer, domInfo);
+        await CrossclimbDOM.sleep(300);
+      }
+
+      // Step 5: Reorder rows to form the correct word ladder
+      status('reordering', 'Reordering rows...');
+      const middleAnswers = AnswerParser.getMiddleAnswersOrdered(puzzleData);
+      await this._reorderRows(domInfo, middleAnswers, matches);
+
+      // Step 6: Wait for top/bottom to unlock and fill them
+      status('finalizing', 'Waiting for top/bottom rows to unlock...');
+      await this._handleTopBottom(domInfo, puzzleData);
+
+      status('done', 'Puzzle solved!');
+      onComplete?.();
+
+    } catch (error) {
+      status('error', error.message);
+      onError?.(error);
+      console.error('[CrossclimbSolver] Error:', error);
+    }
+  },
+
+  // ----- DOM DISCOVERY -----
+
+  async _discoverDOM() {
+    const info = {
+      container: null,
+      rows: [],
+      keyboard: null,
+      isInIframe: false,
+      doc: document,
+    };
+
+    // Check if the game is in an iframe
+    const iframes = document.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      try {
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (iframeDoc) {
+          // Check if this iframe contains the game
+          const gameIndicators = iframeDoc.querySelectorAll(
+            '[class*="crossclimb"], [class*="game"], [class*="puzzle"], [class*="ladder"], [class*="board"]'
+          );
+          if (gameIndicators.length > 0) {
+            info.isInIframe = true;
+            info.doc = iframeDoc;
+            console.log('[CrossclimbSolver] Game found in iframe:', iframe.src);
+            break;
+          }
+        }
+      } catch {
+        // Cross-origin iframe, skip
+      }
+    }
+
+    const doc = info.doc;
+
+    // Find the game container
+    info.container = this._findGameContainer(doc);
+
+    // Find puzzle rows
+    info.rows = this._findRows(doc, info.container);
+
+    // Find keyboard
+    info.keyboard = this._findKeyboard(doc);
+
+    return info;
+  },
+
+  _findGameContainer(doc) {
+    // Try specific selectors first, then broader ones
+    const selectors = [
+      '[class*="crossclimb" i]',
+      '[class*="game-board" i]', '[class*="gameboard" i]',
+      '[class*="puzzle-board" i]', '[class*="puzzleboard" i]',
+      '[class*="word-ladder" i]', '[class*="wordladder" i]',
+      '[data-testid*="game"]', '[data-testid*="board"]',
+      '[role="application"]',
+      'main'
+    ];
+
+    for (const sel of selectors) {
+      try {
+        const el = doc.querySelector(sel);
+        if (el) return el;
+      } catch {
+        // Invalid selector, skip
+      }
+    }
+
+    return doc.body;
+  },
+
+  _findRows(doc, container) {
+    const root = container || doc.body;
+    const rows = [];
+
+    // Strategy 1: Find row containers with letter cells inside
+    const allChildren = root.querySelectorAll('*');
+    for (const el of allChildren) {
+      // Skip very deep or very shallow elements
+      const text = el.textContent.trim();
+      if (text.length > 500 || text.length === 0) continue;
+
+      // Check if this element looks like a puzzle row
+      const children = el.children;
+      if (children.length < 2) continue;
+
+      // Count single-letter elements among children (or grandchildren)
+      const letterEls = el.querySelectorAll('[class*="cell"], [class*="Cell"], [class*="tile"], [class*="Tile"], [class*="letter"], [class*="Letter"]');
+      if (letterEls.length >= 3 && letterEls.length <= 8) {
+        rows.push({
+          element: el,
+          letterElements: [...letterEls],
+          text: text,
+          isLocked: this._isRowLocked(el),
+          currentLetters: [...letterEls].map(le => le.textContent.trim()).join('')
+        });
+        continue;
+      }
+
+      // Alternative: look for children that are single characters
+      const charChildren = [...children].filter(c => /^[A-Z]$/i.test(c.textContent.trim()));
+      if (charChildren.length >= 3) {
+        rows.push({
+          element: el,
+          letterElements: charChildren,
+          text: text,
+          isLocked: this._isRowLocked(el),
+          currentLetters: charChildren.map(c => c.textContent.trim()).join('')
+        });
+      }
+    }
+
+    // Deduplicate: prefer innermost matching elements
+    return this._deduplicateRows(rows);
+  },
+
+  _isRowLocked(element) {
+    // Check for lock indicators
+    const hasLockClass = element.className?.toString().toLowerCase().includes('lock');
+    const hasLockChild = element.querySelector('[class*="lock"], [class*="Lock"], [aria-label*="lock"]');
+    const hasLockText = element.textContent.includes('🔒');
+    const isDisabled = element.getAttribute('aria-disabled') === 'true';
+
+    return hasLockClass || !!hasLockChild || hasLockText || isDisabled;
+  },
+
+  _deduplicateRows(rows) {
+    // Remove rows that are ancestors of other rows (keep the most specific)
+    return rows.filter((row, i) => {
+      return !rows.some((other, j) => {
+        if (i === j) return false;
+        return row.element.contains(other.element) && row.element !== other.element;
+      });
+    });
+  },
+
+  _findKeyboard(doc) {
+    const selectors = [
+      '[class*="keyboard" i]',
+      '[data-testid*="keyboard"]',
+      '[aria-label*="keyboard" i]'
+    ];
+
+    for (const sel of selectors) {
+      try {
+        const el = doc.querySelector(sel);
+        if (el) return el;
+      } catch {
+        // Skip invalid selectors
+      }
+    }
+
+    // Fallback: look for a container with many single-letter buttons
+    const buttons = doc.querySelectorAll('button, [role="button"]');
+    const letterBtns = [...buttons].filter(b => /^[A-Z]$/i.test(b.textContent.trim()));
+    if (letterBtns.length >= 20 && letterBtns[0].parentElement) {
+      // Walk up to find the keyboard container
+      let container = letterBtns[0].parentElement;
+      while (container.parentElement && container.querySelectorAll('button, [role="button"]').length < letterBtns.length) {
+        container = container.parentElement;
+      }
+      return container;
+    }
+
+    return null;
+  },
+
+  // ----- CLUE READING -----
+
+  _readClues(domInfo) {
+    const clues = [];
+
+    for (const row of domInfo.rows) {
+      if (row.isLocked) continue;
+
+      // Try to find clue text associated with this row
+      const clueText = this._extractClueFromRow(row.element, domInfo.doc);
+      if (clueText) {
+        clues.push({
+          text: clueText,
+          rowElement: row.element,
+          letterElements: row.letterElements,
+          currentLetters: row.currentLetters
+        });
+      }
+    }
+
+    return clues;
+  },
+
+  _extractClueFromRow(rowElement, doc) {
+    // Strategy 1: Look for aria-label or data attributes
+    const ariaLabel = rowElement.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.length > 10) return ariaLabel;
+
+    // Strategy 2: Look for a sibling or child with clue-like content
+    const textNodes = [];
+    const walker = doc.createTreeWalker(rowElement, NodeFilter.SHOW_TEXT, null);
+    let node;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent.trim();
+      // Clues are typically sentences/phrases, not single words or letters
+      if (text.length > 10 && !/^[A-Z]{1,2}$/.test(text)) {
+        textNodes.push(text);
+      }
+    }
+    if (textNodes.length > 0) {
+      // Return the longest text node (most likely to be the clue)
+      return textNodes.reduce((a, b) => a.length > b.length ? a : b);
+    }
+
+    // Strategy 3: Check adjacent siblings
+    const parent = rowElement.parentElement;
+    if (parent) {
+      const siblings = [...parent.children];
+      const idx = siblings.indexOf(rowElement);
+
+      // Check next sibling (clue might be below the row)
+      if (idx + 1 < siblings.length) {
+        const nextText = siblings[idx + 1].textContent.trim();
+        if (nextText.length > 10 && nextText.length < 200) return nextText;
+      }
+
+      // Check previous sibling
+      if (idx - 1 >= 0) {
+        const prevText = siblings[idx - 1].textContent.trim();
+        if (prevText.length > 10 && prevText.length < 200) return prevText;
+      }
+    }
+
+    return null;
+  },
+
+  // ----- CLUE-ANSWER MATCHING -----
+
+  _matchCluesToAnswers(clues, puzzleData) {
+    const matches = [];
+    const usedAnswers = new Set();
+
+    for (const clue of clues) {
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const pair of puzzleData.clueAnswerPairs) {
+        if (usedAnswers.has(pair.answer)) continue;
+
+        const score = this._clueMatchScore(clue.text, pair.clue);
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = pair;
+        }
+      }
+
+      if (bestMatch && bestScore > 0.3) {
+        matches.push({
+          clue: clue.text,
+          answer: bestMatch.answer,
+          rowElement: clue.rowElement,
+          letterElements: clue.letterElements,
+          confidence: bestScore
+        });
+        usedAnswers.add(bestMatch.answer);
+      } else {
+        console.warn(`[CrossclimbSolver] No match for clue: "${clue.text.substring(0, 50)}..."`);
+      }
+    }
+
+    // If we couldn't match all 5, try word-length based matching as fallback
+    if (matches.length < 5 && puzzleData.wordLadder.length >= 7) {
+      console.log('[CrossclimbSolver] Falling back to word-length matching');
+      const middleWords = puzzleData.wordLadder.slice(1, 6);
+
+      for (const clue of clues) {
+        const existingMatch = matches.find(m => m.rowElement === clue.rowElement);
+        if (existingMatch) continue;
+
+        // Match by letter count
+        const wordLength = clue.letterElements.length;
+        const candidate = middleWords.find(w => w.length === wordLength && !usedAnswers.has(w));
+        if (candidate) {
+          matches.push({
+            clue: clue.text,
+            answer: candidate,
+            rowElement: clue.rowElement,
+            letterElements: clue.letterElements,
+            confidence: 0.2
+          });
+          usedAnswers.add(candidate);
+        }
+      }
+    }
+
+    return matches;
+  },
+
+  // Score how well two clue texts match (0-1)
+  _clueMatchScore(clueFromDOM, clueFromSite) {
+    const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+
+    const a = normalize(clueFromDOM);
+    const b = normalize(clueFromSite);
+
+    // Exact match
+    if (a === b) return 1.0;
+
+    // One contains the other
+    if (a.includes(b) || b.includes(a)) return 0.9;
+
+    // Word overlap (Jaccard similarity)
+    const wordsA = new Set(a.split(' '));
+    const wordsB = new Set(b.split(' '));
+    const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
+    const union = new Set([...wordsA, ...wordsB]);
+    const jaccard = intersection.size / union.size;
+
+    return jaccard;
+  },
+
+  // ----- ANSWER TYPING -----
+
+  async _typeAnswer(rowElement, answer, domInfo) {
+    // First, click/select the row
+    await CrossclimbDOM.clickElement(rowElement);
+    await CrossclimbDOM.sleep(200);
+
+    // Try multiple typing strategies
+    const strategies = [
+      () => this._typeViaKeyboard(answer, domInfo),
+      () => this._typeViaKeyEvents(rowElement, answer),
+      () => this._typeViaVirtualKeyboard(answer, domInfo),
+    ];
+
+    for (const strategy of strategies) {
+      try {
+        await strategy();
+        return;
+      } catch (error) {
+        console.log(`[CrossclimbSolver] Typing strategy failed: ${error.message}, trying next...`);
+      }
+    }
+
+    throw new Error(`Failed to type answer "${answer}" into row`);
+  },
+
+  // Type using keyboard events on the focused element
+  async _typeViaKeyEvents(rowElement, answer) {
+    // The active element after clicking the row
+    const target = document.activeElement || rowElement;
+    await CrossclimbDOM.simulateKeyPresses(target, answer, { delay: 80 });
+  },
+
+  // Type using the virtual keyboard buttons
+  async _typeViaVirtualKeyboard(answer, domInfo) {
+    if (!domInfo.keyboard) {
+      throw new Error('No virtual keyboard found');
+    }
+    await CrossclimbDOM.clickVirtualKeyboard(answer, {
+      keyboardSelector: null // We already have the keyboard element
+    });
+  },
+
+  // Type by dispatching keyboard events to the document
+  async _typeViaKeyboard(answer, domInfo) {
+    for (const char of answer) {
+      const key = char.toUpperCase();
+      const code = `Key${key}`;
+      const keyCode = key.charCodeAt(0);
+
+      const props = {
+        key, code, keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true,
+        composed: true
+      };
+
+      // Dispatch to both the document and any focused element
+      const targets = [document, document.activeElement].filter(Boolean);
+      for (const target of targets) {
+        target.dispatchEvent(new KeyboardEvent('keydown', props));
+        target.dispatchEvent(new KeyboardEvent('keypress', props));
+        target.dispatchEvent(new KeyboardEvent('keyup', props));
+      }
+
+      await CrossclimbDOM.sleep(80);
+    }
+  },
+
+  // ----- ROW REORDERING -----
+
+  async _reorderRows(domInfo, correctOrder, matches) {
+    // correctOrder is an array of words in the correct top-to-bottom sequence
+    // matches tells us which answer is in which row element
+
+    // Build a map of answer -> current DOM position
+    const answerToElement = new Map();
+    for (const match of matches) {
+      answerToElement.set(match.answer, match.rowElement);
+    }
+
+    // Get current visual order of rows (sorted by Y position)
+    const rowPositions = matches.map(match => ({
+      answer: match.answer,
+      element: match.rowElement,
+      y: match.rowElement.getBoundingClientRect().top
+    }));
+    rowPositions.sort((a, b) => a.y - b.y);
+    const currentOrder = rowPositions.map(r => r.answer);
+
+    console.log('[CrossclimbSolver] Current order:', currentOrder);
+    console.log('[CrossclimbSolver] Target order:', correctOrder);
+
+    // Calculate the moves needed (bubble sort approach — swap adjacent elements)
+    const moves = this._calculateMoves(currentOrder, correctOrder);
+    console.log(`[CrossclimbSolver] Need ${moves.length} swap(s) to reorder`);
+
+    // Execute each move with drag simulation
+    for (let i = 0; i < moves.length; i++) {
+      const move = moves[i];
+      console.log(`[CrossclimbSolver] Move ${i + 1}: Swap "${move.word}" from position ${move.from} to ${move.to}`);
+
+      // Re-read current positions (they may have changed after previous drags)
+      const freshPositions = matches
+        .map(m => ({ answer: m.answer, element: m.rowElement, y: m.rowElement.getBoundingClientRect().top }))
+        .sort((a, b) => a.y - b.y);
+
+      const sourceIdx = freshPositions.findIndex(p => p.answer === move.word);
+      const targetIdx = move.to;
+
+      if (sourceIdx === -1 || sourceIdx === targetIdx) continue;
+
+      const sourceEl = freshPositions[sourceIdx].element;
+      const targetEl = freshPositions[targetIdx].element;
+
+      // Try pointer drag first, then HTML5 drag, then touch
+      const dragStrategies = [
+        () => CrossclimbDOM.pointerDrag(sourceEl, targetEl),
+        () => CrossclimbDOM.html5DragDrop(sourceEl, targetEl),
+        () => CrossclimbDOM.touchDrag(sourceEl, targetEl),
+      ];
+
+      let dragSuccess = false;
+      for (const strategy of dragStrategies) {
+        try {
+          await strategy();
+          dragSuccess = true;
+          break;
+        } catch (error) {
+          console.log(`[CrossclimbSolver] Drag strategy failed: ${error.message}`);
+        }
+      }
+
+      if (!dragSuccess) {
+        console.warn('[CrossclimbSolver] All drag strategies failed for this move');
+      }
+
+      await CrossclimbDOM.sleep(500); // Wait for animation
+    }
+  },
+
+  // Calculate minimum swaps to transform currentOrder into targetOrder
+  _calculateMoves(current, target) {
+    const moves = [];
+    const arr = [...current];
+
+    for (let i = 0; i < target.length; i++) {
+      if (arr[i] !== target[i]) {
+        const fromIdx = arr.indexOf(target[i]);
+        if (fromIdx === -1) continue;
+
+        moves.push({
+          word: target[i],
+          from: fromIdx,
+          to: i
+        });
+
+        // Perform the swap in our tracking array
+        [arr[i], arr[fromIdx]] = [arr[fromIdx], arr[i]];
+      }
+    }
+
+    return moves;
+  },
+
+  // ----- TOP/BOTTOM HANDLING -----
+
+  async _handleTopBottom(domInfo, puzzleData) {
+    if (!puzzleData.startWord || !puzzleData.endWord) {
+      console.log('[CrossclimbSolver] No start/end words to fill');
+      return;
+    }
+
+    // Wait for top/bottom rows to become unlocked
+    try {
+      await CrossclimbDOM.waitForCondition(() => {
+        // Re-find rows and check if locked status changed
+        const rows = this._findRows(domInfo.doc, domInfo.container);
+        const lockedRows = rows.filter(r => r.isLocked);
+        return lockedRows.length === 0;
+      }, { timeout: 10000, pollInterval: 500 });
+    } catch {
+      console.log('[CrossclimbSolver] Top/bottom rows did not unlock within timeout');
+      console.log('[CrossclimbSolver] They may need manual intervention or may already be filled');
+      return;
+    }
+
+    console.log('[CrossclimbSolver] Top/bottom rows unlocked!');
+
+    // Re-discover rows
+    const freshDomInfo = await this._discoverDOM();
+
+    // Find the top and bottom rows (by position)
+    const sortedRows = freshDomInfo.rows
+      .map(r => ({ ...r, y: r.element.getBoundingClientRect().top }))
+      .sort((a, b) => a.y - b.y);
+
+    if (sortedRows.length >= 2) {
+      const topRow = sortedRows[0];
+      const bottomRow = sortedRows[sortedRows.length - 1];
+
+      // Type the start word in the top row
+      if (!topRow.isLocked) {
+        console.log(`[CrossclimbSolver] Typing "${puzzleData.startWord}" in top row`);
+        await this._typeAnswer(topRow.element, puzzleData.startWord, freshDomInfo);
+        await CrossclimbDOM.sleep(300);
+      }
+
+      // Type the end word in the bottom row
+      if (!bottomRow.isLocked) {
+        console.log(`[CrossclimbSolver] Typing "${puzzleData.endWord}" in bottom row`);
+        await this._typeAnswer(bottomRow.element, puzzleData.endWord, freshDomInfo);
+      }
+    }
+  }
+};
