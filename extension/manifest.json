@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Crossclimb Solver",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Automatically solves LinkedIn Crossclimb puzzles by fetching answers and interacting with the game UI.",
   "permissions": [
     "activeTab"
