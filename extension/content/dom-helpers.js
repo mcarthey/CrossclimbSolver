@@ -473,6 +473,11 @@ const CrossclimbDOM = {
     return this._bridgeCmd('drag', { srcSel, tgtSel }, 8000);
   },
 
+  // Read current board order by reading input values in DOM order
+  async pageReadOrder() {
+    return this._bridgeCmd('read-order', {}, 3000);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {

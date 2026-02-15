@@ -49,6 +49,10 @@
           doDragAsync(d.srcSel, d.tgtSel, result);
           return; // ack sent async
 
+        case 'read-order':
+          result.data = readBoardOrder();
+          break;
+
         default:
           result.ok = false;
           result.error = 'unknown action: ' + d.action;
@@ -354,6 +358,39 @@
       setTimeout(dragStep, 16);
     }
     setTimeout(dragStep, 150);
+  }
+
+  // ---- READ BOARD ORDER ----
+  // Reads the current row order by iterating DOM children (which reflects visual order
+  // after any drag-and-drop reordering) and reading input values.
+
+  function readBoardOrder() {
+    // The middle rows live inside an <ol class="crossclimb__guess__container">
+    var container = document.querySelector('.crossclimb__guess__container');
+    if (!container) {
+      // Fallback: find rows inside the grid
+      container = document.querySelector('.crossclimb__grid');
+    }
+    if (!container) return { error: 'no container found' };
+
+    var rows = [];
+    // Iterate children in DOM order (= visual order after drag reordering)
+    var children = container.querySelectorAll('.crossclimb__guess--middle');
+    for (var i = 0; i < children.length; i++) {
+      var row = children[i];
+      var inputs = row.querySelectorAll('.crossclimb__guess_box input');
+      var word = '';
+      for (var j = 0; j < inputs.length; j++) {
+        word += (inputs[j].value || '').toUpperCase();
+      }
+      rows.push({
+        word: word,
+        csRow: row.getAttribute('data-cs-row') || '',
+        y: Math.round(row.getBoundingClientRect().top)
+      });
+    }
+
+    return { rows: rows };
   }
 
   // ---- UTILITIES ----
