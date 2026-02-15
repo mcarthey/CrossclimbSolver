@@ -33,6 +33,10 @@
           if (fel) { fel.focus(); } else { result.ok = false; result.error = 'not found'; }
           break;
 
+        case 'fill-row':
+          fillRowAsync(d.rowSelector, d.word, result);
+          return; // ack sent async
+
         case 'type-key':
           result.details = typeOneKey(d.key);
           break;
@@ -180,62 +184,112 @@
     el.focus();
   }
 
-  // ---- TYPING ----
+  // ---- FILL ROW (primary typing strategy) ----
+  // Targets each <input> in a row individually using execCommand('insertText')
+
+  function fillRowAsync(rowSelector, word, result) {
+    var row = document.querySelector(rowSelector);
+    if (!row) {
+      result.ok = false;
+      result.error = 'row not found: ' + rowSelector;
+      window.postMessage(result, '*');
+      return;
+    }
+
+    // Find all inputs within the guess boxes
+    var inputs = row.querySelectorAll('.crossclimb__guess_box input.ember-text-field');
+    if (inputs.length === 0) {
+      inputs = row.querySelectorAll('.crossclimb__guess_box input');
+    }
+    if (inputs.length === 0) {
+      inputs = row.querySelectorAll('input');
+    }
+
+    result.inputCount = inputs.length;
+    result.wordLength = word.length;
+
+    if (inputs.length < word.length) {
+      result.ok = false;
+      result.error = 'inputs=' + inputs.length + ' need=' + word.length;
+      window.postMessage(result, '*');
+      return;
+    }
+
+    // First, click the first input to activate the row
+    var firstInput = inputs[0];
+    var rect = firstInput.getBoundingClientRect();
+    var cx = rect.left + rect.width / 2;
+    var cy = rect.top + rect.height / 2;
+    firstInput.dispatchEvent(new PointerEvent('pointerdown', { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    firstInput.dispatchEvent(new MouseEvent('mousedown', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+    firstInput.dispatchEvent(new PointerEvent('pointerup', { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+    firstInput.dispatchEvent(new MouseEvent('mouseup', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+    firstInput.dispatchEvent(new MouseEvent('click', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+    firstInput.focus();
+
+    var idx = 0;
+    var details = [];
+
+    function fillNext() {
+      if (idx >= word.length) {
+        result.fillDetails = details;
+        window.postMessage(result, '*');
+        return;
+      }
+
+      var input = inputs[idx];
+      var letter = word[idx].toLowerCase();
+      var detail = { idx: idx, letter: letter };
+
+      // Focus this specific input
+      input.focus();
+
+      // Select any existing content so execCommand replaces it
+      input.select();
+
+      // Use execCommand to insert — this creates TRUSTED input events
+      var ok = document.execCommand('insertText', false, letter);
+      detail.execOk = ok;
+      detail.valueAfter = input.value;
+
+      // If execCommand didn't work, fall back to direct value setting + events
+      if (!ok || input.value !== letter) {
+        // Use native setter to bypass Ember's value tracking
+        var nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        if (nativeSetter && nativeSetter.set) {
+          nativeSetter.set.call(input, letter);
+        } else {
+          input.value = letter;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        detail.fallback = true;
+        detail.valueAfter = input.value;
+      }
+
+      details.push(detail);
+      idx++;
+      setTimeout(fillNext, 120);
+    }
+
+    // Start after a brief delay for row activation
+    setTimeout(fillNext, 200);
+  }
+
+  // ---- TYPING (legacy fallback, now only uses execCommand) ----
 
   function typeOneKey(key) {
     var details = { strategies: [] };
-    var code = 'Key' + key.toUpperCase();
-    var kc = key.toUpperCase().charCodeAt(0);
-
-    // Strategy 1: KeyboardEvent on activeElement + document
     var ae = document.activeElement;
     details.activeTag = ae ? ae.tagName : 'null';
     details.activeClass = ae ? (ae.className || '').substring(0, 50) : '';
 
-    var props = { key: key, code: code, keyCode: kc, which: kc, bubbles: true, cancelable: true, composed: true };
-    var targets = [ae, document];
-    for (var i = 0; i < targets.length; i++) {
-      if (!targets[i]) continue;
-      targets[i].dispatchEvent(new KeyboardEvent('keydown', props));
-      targets[i].dispatchEvent(new KeyboardEvent('keypress', props));
-      targets[i].dispatchEvent(new KeyboardEvent('keyup', props));
-    }
-    details.strategies.push('keyboard');
-
-    // Strategy 2: execCommand('insertText')
+    // Only use execCommand — the one strategy proven to work
     try {
       var ok = document.execCommand('insertText', false, key);
       details.strategies.push('execCommand=' + ok);
     } catch (e) {
       details.strategies.push('execCommand=err');
-    }
-
-    // Strategy 3: InputEvent on activeElement
-    if (ae && ae !== document.body && ae !== document.documentElement) {
-      try {
-        ae.dispatchEvent(new InputEvent('beforeinput', {
-          inputType: 'insertText', data: key, bubbles: true, cancelable: true, composed: true
-        }));
-        ae.dispatchEvent(new InputEvent('input', {
-          inputType: 'insertText', data: key, bubbles: true, composed: true
-        }));
-        details.strategies.push('inputEvent');
-      } catch (e) {
-        details.strategies.push('inputEvent=err');
-      }
-    }
-
-    // Strategy 4: Find game-specific input (hidden input in guess area)
-    var gameInput = document.querySelector('.crossclimb__guess--new-focus input') ||
-                    document.querySelector('.crossclimb__grid input[type="text"]') ||
-                    document.querySelector('.crossclimb__wrapper input:not([type="hidden"])');
-    if (gameInput) {
-      gameInput.focus();
-      gameInput.value = (gameInput.value || '') + key;
-      gameInput.dispatchEvent(new Event('input', { bubbles: true }));
-      gameInput.dispatchEvent(new Event('change', { bubbles: true }));
-      details.strategies.push('hiddenInput');
-      details.gameInputClass = (gameInput.className || '').substring(0, 50);
     }
 
     return details;

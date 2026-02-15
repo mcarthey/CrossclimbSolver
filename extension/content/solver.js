@@ -140,10 +140,10 @@ const Solver = {
           continue;
         }
 
-        log(`  Typing "${answer}" into row ${i + 1}`);
+        log(`Typing "${answer}" into row ${i + 1}`);
         await this._typeIntoRow(row, answer, board, log);
         filledAnswers.push({ answer, rowElement: row, index: i });
-        await CrossclimbDOM.sleep(300);
+        await CrossclimbDOM.sleep(500);
       }
 
       log(`Filled ${filledAnswers.length}/${board.middleRows.length} rows`);
@@ -342,31 +342,29 @@ const Solver = {
 
   async _typeIntoRow(rowElement, answer, board, log) {
     const idx = rowElement.getAttribute('data-cs-row');
-    const boxSel = `[data-cs-row="${idx}"] .crossclimb__guess_box`;
+    const rowSel = `[data-cs-row="${idx}"]`;
 
-    // Click the first box via page-context bridge
-    const clickResult = await CrossclimbDOM.pageClick(boxSel);
-    if (log) log(`  Click box: ok=${clickResult.ok}${clickResult.error ? ' err=' + clickResult.error : ''}`);
-    await CrossclimbDOM.sleep(200);
-
-    // Type the whole word via the page-context bridge
-    const result = await CrossclimbDOM.pageTypeWord(answer);
+    // Primary: Use fill-row to target each input individually via execCommand
+    const result = await CrossclimbDOM.pageFillRow(rowSel, answer);
     if (log) {
-      log(`  Type word: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
-      // Log details from first key to understand what strategies were tried
-      if (result.keyDetails && result.keyDetails[0]) {
-        const kd = result.keyDetails[0];
-        log(`  First key: active=${kd.activeTag}.${kd.activeClass} strategies=[${kd.strategies?.join(', ')}]`);
+      log(`  Fill row: ok=${result.ok} inputs=${result.inputCount || '?'}${result.error ? ' err=' + result.error : ''}`);
+      // Log per-letter details
+      if (result.fillDetails) {
+        const summary = result.fillDetails.map(d =>
+          `${d.letter}${d.execOk ? '' : '!exec'}${d.fallback ? '(fb)' : ''}=${d.valueAfter || '?'}`
+        ).join(' ');
+        log(`  Letters: ${summary}`);
       }
     }
 
     if (!result.ok) {
-      // Fallback: try key-by-key from page context
-      if (log) log(`  Falling back to key-by-key typing`);
-      for (const char of answer) {
-        await CrossclimbDOM.pageTypeKey(char);
-        await CrossclimbDOM.sleep(80);
-      }
+      // Fallback: click first box + type word via execCommand-only
+      if (log) log(`  Falling back to type-word`);
+      const boxSel = `${rowSel} .crossclimb__guess_box`;
+      await CrossclimbDOM.pageClick(boxSel);
+      await CrossclimbDOM.sleep(200);
+      const typeResult = await CrossclimbDOM.pageTypeWord(answer);
+      if (log) log(`  Type word fallback: ok=${typeResult.ok}`);
     }
   },
 

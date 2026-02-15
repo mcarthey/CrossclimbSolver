@@ -463,6 +463,11 @@ const CrossclimbDOM = {
     return this._bridgeCmd('focus', { selector });
   },
 
+  // Fill a row's inputs with a word, targeting each input individually
+  async pageFillRow(rowSelector, word) {
+    return this._bridgeCmd('fill-row', { rowSelector, word }, 15000);
+  },
+
   // Drag from source to target (by CSS selectors) in the page's JS context
   async pageDrag(srcSel, tgtSel) {
     return this._bridgeCmd('drag', { srcSel, tgtSel }, 8000);
