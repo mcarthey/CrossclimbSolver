@@ -61,6 +61,13 @@ const Solver = {
 
       log(`Found game board: ${board.middleRows.length} middle rows, ${board.lockedRows.length} locked rows`);
 
+      // Tag rows with data attributes so the page-context bridge can find them
+      board.middleRows.forEach((row, i) => row.setAttribute('data-cs-row', String(i)));
+      board.lockedRows.forEach((row, i) => row.setAttribute('data-cs-lock', String(i)));
+
+      // Inject the page-context bridge for event dispatch
+      CrossclimbDOM.injectBridge();
+
       // Step 2: Build clue-answer map from our puzzle data
       status('matching', 'Preparing answers...');
       const middleAnswers = AnswerParser.getMiddleAnswersOrdered(puzzleData);
@@ -211,29 +218,25 @@ const Solver = {
   // ----- ROW ACTIVATION -----
 
   async _activateRow(rowElement) {
-    // Click on the row's inner area to activate/focus it
-    const inner = rowElement.querySelector('.crossclimb__guess__inner') || rowElement;
-    const firstBox = rowElement.querySelector('.crossclimb__guess_box') || inner;
+    const idx = rowElement.getAttribute('data-cs-row');
+    const baseSel = `[data-cs-row="${idx}"]`;
 
-    // Click the first letter box to place focus there
-    await CrossclimbDOM.clickElement(firstBox);
-    await CrossclimbDOM.sleep(100);
+    // Click the first guess box via the page-context bridge
+    const boxSel = `${baseSel} .crossclimb__guess_box`;
+    let result = await CrossclimbDOM.pageClick(boxSel);
+    await CrossclimbDOM.sleep(150);
 
-    // Also try clicking the inner container
-    if (inner !== firstBox) {
-      await CrossclimbDOM.clickElement(inner);
-      await CrossclimbDOM.sleep(100);
-    }
+    // Also click the inner container
+    const innerSel = `${baseSel} .crossclimb__guess__inner`;
+    await CrossclimbDOM.pageClick(innerSel);
+    await CrossclimbDOM.sleep(150);
 
-    // Verify activation by checking for focus class
+    // If still not focused, click the row itself
     const isActive = rowElement.className.includes('new-focus') ||
-                     rowElement.className.includes('active') ||
-                     rowElement.className.includes('selected');
-
+                     rowElement.className.includes('active');
     if (!isActive) {
-      // Try clicking the row itself
-      await CrossclimbDOM.clickElement(rowElement);
-      await CrossclimbDOM.sleep(100);
+      await CrossclimbDOM.pageClick(baseSel);
+      await CrossclimbDOM.sleep(150);
     }
   },
 
@@ -312,57 +315,23 @@ const Solver = {
   // ----- TYPING -----
 
   async _typeIntoRow(rowElement, answer, board) {
-    // Strategy 1: Type via keyboard events on the active element
-    // The game likely listens for key events on the document or a focused element
-    const boxes = rowElement.querySelectorAll('.crossclimb__guess_box');
+    const idx = rowElement.getAttribute('data-cs-row');
+    const boxSel = `[data-cs-row="${idx}"] .crossclimb__guess_box`;
 
-    if (boxes.length > 0) {
-      // Click the first box to ensure focus
-      await CrossclimbDOM.clickElement(boxes[0]);
-      await CrossclimbDOM.sleep(100);
-    }
+    // Make sure the first box is focused/clicked in page context
+    await CrossclimbDOM.pageClick(boxSel);
+    await CrossclimbDOM.sleep(200);
 
-    // Type each letter
-    for (let i = 0; i < answer.length; i++) {
-      const char = answer[i];
-      await this._typeKey(char, rowElement, board);
-      await CrossclimbDOM.sleep(80);
-    }
-  },
-
-  async _typeKey(char, rowElement, board) {
-    const key = char.toUpperCase();
-    const code = `Key${key}`;
-    const keyCode = key.charCodeAt(0);
-
-    const props = {
-      key, code, keyCode,
-      which: keyCode,
-      charCode: keyCode,
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    };
-
-    // Dispatch to multiple targets to maximize chances
-    const targets = new Set([
-      document.activeElement,
-      rowElement,
-      rowElement.querySelector('.crossclimb__guess__inner'),
-      board.gridContainer,
-      board.wrapper,
-      document,
-    ].filter(Boolean));
-
-    for (const target of targets) {
-      target.dispatchEvent(new KeyboardEvent('keydown', props));
-      target.dispatchEvent(new KeyboardEvent('keypress', { ...props, charCode: char.charCodeAt(0) }));
-    }
-
-    await CrossclimbDOM.sleep(20);
-
-    for (const target of targets) {
-      target.dispatchEvent(new KeyboardEvent('keyup', props));
+    // Type the whole word via the page-context bridge
+    // This dispatches KeyboardEvents in the page's JS realm where Ember can see them
+    const result = await CrossclimbDOM.pageTypeWord(answer);
+    if (!result.ok) {
+      console.warn(`[CrossclimbSolver] Bridge type-word failed: ${result.error}`);
+      // Fallback: try key-by-key from page context
+      for (const char of answer) {
+        await CrossclimbDOM.pageTypeKey(char);
+        await CrossclimbDOM.sleep(80);
+      }
     }
   },
 
@@ -418,33 +387,21 @@ const Solver = {
 
       if (!sourceEntry || !targetEntry || sourceEntry.element === targetEntry.element) continue;
 
-      // Use the drag handle (crossclimb__guess-dragger) for dragging
-      const sourceDragger = sourceEntry.element.querySelector('.crossclimb__guess-dragger:not(.crossclimb__guess-dragger__right)') ||
-                            sourceEntry.element.querySelector('.crossclimb__guess-dragger') ||
-                            sourceEntry.element;
+      // Get data-cs-row indices for CSS selectors
+      const srcIdx = sourceEntry.element.getAttribute('data-cs-row');
+      const tgtIdx = targetEntry.element.getAttribute('data-cs-row');
 
-      const targetDragger = targetEntry.element.querySelector('.crossclimb__guess-dragger:not(.crossclimb__guess-dragger__right)') ||
-                            targetEntry.element.querySelector('.crossclimb__guess-dragger') ||
-                            targetEntry.element;
-
-      // Try multiple drag strategies
-      let success = false;
+      // Try drag via page-context bridge (dragger handle first, then row itself)
       const strategies = [
-        { name: 'pointer', fn: () => CrossclimbDOM.pointerDrag(sourceDragger, targetDragger) },
-        { name: 'pointer-row', fn: () => CrossclimbDOM.pointerDrag(sourceEntry.element, targetEntry.element) },
-        { name: 'html5', fn: () => CrossclimbDOM.html5DragDrop(sourceDragger, targetDragger) },
-        { name: 'touch', fn: () => CrossclimbDOM.touchDrag(sourceDragger, targetDragger) },
+        { name: 'bridge-dragger', srcSel: `[data-cs-row="${srcIdx}"] .crossclimb__guess-dragger`, tgtSel: `[data-cs-row="${tgtIdx}"] .crossclimb__guess-dragger` },
+        { name: 'bridge-row', srcSel: `[data-cs-row="${srcIdx}"]`, tgtSel: `[data-cs-row="${tgtIdx}"]` },
       ];
 
-      for (const strategy of strategies) {
-        try {
-          await strategy.fn();
-          log(`    Drag via ${strategy.name} completed`);
-          success = true;
-          break;
-        } catch (e) {
-          log(`    Drag via ${strategy.name} failed: ${e.message}`);
-        }
+      let success = false;
+      for (const s of strategies) {
+        const result = await CrossclimbDOM.pageDrag(s.srcSel, s.tgtSel);
+        log(`    Drag via ${s.name}: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
+        if (result.ok) { success = true; break; }
       }
 
       if (!success) {
