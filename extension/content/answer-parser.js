@@ -1,15 +1,11 @@
 // CrossclimbSolver - Answer Parser
 // Parses HTML from crossclimbanswer.io to extract puzzle solutions
-//
-// The site is a Next.js React app. The most reliable data source is the
-// __NEXT_DATA__ JSON embedded in a <script> tag. Fallback strategies parse
-// the rendered HTML directly.
 
 const AnswerParser = {
   // Parse the answer page HTML and return structured puzzle data
   parse(html) {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const allText = doc.body?.textContent || doc.body?.innerText || html;
+    const allText = doc.body?.textContent || '';
 
     const result = {
       wordLadder: [],
@@ -20,26 +16,31 @@ const AnswerParser = {
       theme: null
     };
 
-    console.log('[CrossclimbSolver] Parsing answer page, HTML length:', html.length);
+    console.log('[CrossclimbSolver] Parsing answer page, HTML length:', html.length, 'text length:', allText.length);
 
-    // --- STEP 1: Extract start/end words (most reliable patterns) ---
-    this._extractStartEndWords(allText, html, result);
-    console.log('[CrossclimbSolver] Start word:', result.startWord, 'End word:', result.endWord);
-
-    // --- STEP 2: Extract clue-answer pairs from tables ---
+    // --- STEP 1: Extract clue-answer pairs from tables (most reliable) ---
     result.clueAnswerPairs = this._extractClueAnswerPairsFromHTML(doc);
     if (result.clueAnswerPairs.length === 0) {
-      // Try regex on raw HTML as fallback (handles cases where DOMParser strips content)
       result.clueAnswerPairs = this._extractClueAnswerPairsFromRawHTML(html);
     }
-    console.log('[CrossclimbSolver] Found', result.clueAnswerPairs.length, 'clue-answer pairs:',
-      result.clueAnswerPairs.map(p => `${p.answer}: ${p.clue.substring(0, 30)}`));
+    const middleAnswers = result.clueAnswerPairs.map(p => p.answer);
+    console.log('[CrossclimbSolver] Found', result.clueAnswerPairs.length, 'clue-answer pairs:', middleAnswers.join(', '));
 
-    // --- STEP 3: Extract word ladder from HTML structure ---
+    // --- STEP 2: Extract word ladder from HTML structure ---
+    // The site displays all 7 words in stacked divs with tracking/uppercase classes
     const htmlLadder = this._extractWordLadderFromHTML(doc);
+    console.log('[CrossclimbSolver] HTML ladder extraction:', htmlLadder.join(', '), `(${htmlLadder.length} words)`);
     if (htmlLadder.length >= 7 && this._isValidLadder(htmlLadder)) {
       result.wordLadder = htmlLadder;
-      console.log('[CrossclimbSolver] Ladder from HTML:', htmlLadder.join(' → '));
+      result.startWord = htmlLadder[0];
+      result.endWord = htmlLadder[htmlLadder.length - 1];
+      console.log('[CrossclimbSolver] Valid 7-word ladder from HTML:', htmlLadder.join(' → '));
+    }
+
+    // --- STEP 3: Extract start/end words (multiple strategies) ---
+    if (!result.startWord || !result.endWord) {
+      this._extractStartEndWords(allText, html, doc, result);
+      console.log('[CrossclimbSolver] Start word:', result.startWord, 'End word:', result.endWord);
     }
 
     // --- STEP 4: Try __NEXT_DATA__ ---
@@ -51,14 +52,21 @@ const AnswerParser = {
     }
 
     // --- STEP 5: Reconstruct ladder from known parts ---
-    if (result.wordLadder.length < 7 && result.startWord && result.endWord) {
-      console.log('[CrossclimbSolver] Reconstructing ladder from start/end + answers');
-      const middleAnswers = result.clueAnswerPairs.map(p => p.answer);
+    if (result.wordLadder.length < 7 && result.startWord && result.endWord && middleAnswers.length >= 5) {
+      console.log('[CrossclimbSolver] Reconstructing ladder via BFS:', result.startWord, '→', result.endWord, 'through', middleAnswers.join(', '));
       const allWords = [result.startWord, ...middleAnswers, result.endWord];
       const path = this._findPath(result.startWord, result.endWord, allWords);
       if (path && path.length === 7) {
         result.wordLadder = path;
         console.log('[CrossclimbSolver] Reconstructed ladder:', path.join(' → '));
+      } else {
+        console.log('[CrossclimbSolver] BFS failed, trying brute force ordering');
+        // Try brute force: we have 5 middle + 2 endpoints, order them
+        const ordered = this._bruteForceOrder(result.startWord, result.endWord, middleAnswers);
+        if (ordered && ordered.length === 7) {
+          result.wordLadder = ordered;
+          console.log('[CrossclimbSolver] Brute-force ordered ladder:', ordered.join(' → '));
+        }
       }
     }
 
@@ -88,45 +96,94 @@ const AnswerParser = {
 
   // ----- START/END WORD EXTRACTION -----
 
-  _extractStartEndWords(allText, rawHtml, result) {
-    // Pattern 1: "Top: WORD" and "Bottom: WORD" (from the info table)
-    const topMatch = allText.match(/Top[:\s]+([A-Z]{3,7})/i) ||
-                     rawHtml.match(/Top[:\s<>/span]*([A-Z]{3,7})/i);
-    const bottomMatch = allText.match(/Bottom[:\s]+([A-Z]{3,7})/i) ||
-                        rawHtml.match(/Bottom[:\s<>/span]*([A-Z]{3,7})/i);
+  _extractStartEndWords(allText, rawHtml, doc, result) {
+    // Strategy A: Find "Top" and "Bottom" labels in the HTML structure
+    // The site uses: <p>Top</p><p>HORNS</p> and <p>Bottom</p><p>BRASS</p>
+    if (doc) {
+      const allPs = doc.querySelectorAll('p');
+      for (let i = 0; i < allPs.length - 1; i++) {
+        const label = allPs[i].textContent.trim().toLowerCase();
+        const word = allPs[i + 1].textContent.trim().toUpperCase();
+        if (label === 'top' && /^[A-Z]{3,7}$/.test(word)) {
+          result.startWord = word;
+        }
+        if (label === 'bottom' && /^[A-Z]{3,7}$/.test(word)) {
+          result.endWord = word;
+        }
+      }
+    }
+    if (result.startWord && result.endWord) return;
 
-    if (topMatch) result.startWord = topMatch[1].toUpperCase();
-    if (bottomMatch) result.endWord = bottomMatch[1].toUpperCase();
+    // Strategy B: Text pattern "Top: WORD" or "Top WORD"
+    const topMatch = allText.match(/\bTop\b[:\s]+([A-Z]{3,7})\b/i);
+    const bottomMatch = allText.match(/\bBottom\b[:\s]+([A-Z]{3,7})\b/i);
+    if (topMatch) result.startWord = result.startWord || topMatch[1].toUpperCase();
+    if (bottomMatch) result.endWord = result.endWord || bottomMatch[1].toUpperCase();
+    if (result.startWord && result.endWord) return;
 
-    // Pattern 2: "WORD → WORD" (arrow display in hero section)
-    if (!result.startWord || !result.endWord) {
-      // Match both actual arrow and HTML entities
-      const arrowMatch = allText.match(/\b([A-Z]{3,7})\s*[→\u2192]\s*([A-Z]{3,7})\b/i) ||
-                         rawHtml.match(/([A-Z]{3,7})\s*(?:→|&rarr;|&#8594;|&#x2192;)\s*([A-Z]{3,7})/i);
-      if (arrowMatch) {
-        result.startWord = result.startWord || arrowMatch[1].toUpperCase();
-        result.endWord = result.endWord || arrowMatch[2].toUpperCase();
+    // Strategy C: "WORD → WORD" arrow pattern
+    const arrowMatch = allText.match(/\b([A-Z]{3,7})\s*[→\u2192]\s*([A-Z]{3,7})\b/i) ||
+                       rawHtml.match(/([A-Z]{3,7})\s*(?:→|&rarr;|&#8594;|&#x2192;)\s*([A-Z]{3,7})/i);
+    if (arrowMatch) {
+      result.startWord = result.startWord || arrowMatch[1].toUpperCase();
+      result.endWord = result.endWord || arrowMatch[2].toUpperCase();
+    }
+    if (result.startWord && result.endWord) return;
+
+    // Strategy D: "WORD into WORD" pattern (from page description)
+    const intoMatch = allText.match(/\b([A-Z]{3,7})\s+into\s+([A-Z]{3,7})\b/i);
+    if (intoMatch) {
+      result.startWord = result.startWord || intoMatch[1].toUpperCase();
+      result.endWord = result.endWord || intoMatch[2].toUpperCase();
+    }
+    if (result.startWord && result.endWord) return;
+
+    // Strategy E: Find words NOT in clue-answer pairs that form valid ladder endpoints
+    if (result.clueAnswerPairs.length >= 5) {
+      const middleSet = new Set(result.clueAnswerPairs.map(p => p.answer));
+      const wordLen = result.clueAnswerPairs[0]?.answer.length;
+
+      if (wordLen) {
+        // Find all uppercase words of the same length in the text
+        const allWords = allText.match(new RegExp(`\\b[A-Z]{${wordLen}}\\b`, 'g')) || [];
+        const candidates = [...new Set(allWords.map(w => w.toUpperCase()))].filter(w => !middleSet.has(w));
+
+        console.log('[CrossclimbSolver] Start/end candidates (not in middle):', candidates.join(', '));
+
+        // Try each pair as start/end and see if BFS finds a valid 7-word path
+        for (const c1 of candidates) {
+          for (const c2 of candidates) {
+            if (c1 === c2) continue;
+            const path = this._findPath(c1, c2, [c1, ...middleSet, c2]);
+            if (path && path.length === 7) {
+              result.startWord = result.startWord || c1;
+              result.endWord = result.endWord || c2;
+              console.log('[CrossclimbSolver] Found endpoints via BFS:', c1, '→', c2);
+              return;
+            }
+          }
+        }
       }
     }
 
-    // Pattern 3: Look in raw HTML for "top" and "bottom" near uppercase words
-    if (!result.startWord || !result.endWord) {
-      const topHtml = rawHtml.match(/[Tt]op.*?([A-Z]{3,7})/);
-      const bottomHtml = rawHtml.match(/[Bb]ottom.*?([A-Z]{3,7})/);
-      if (topHtml) result.startWord = result.startWord || topHtml[1];
-      if (bottomHtml) result.endWord = result.endWord || bottomHtml[1];
+    // Strategy F: Scan raw HTML for "Top" and "Bottom" near words
+    if (!result.startWord) {
+      const topHtml = rawHtml.match(/[Tt]op<\/\w+>\s*<\w+[^>]*>\s*([A-Z]{3,7})\b/);
+      if (topHtml) result.startWord = topHtml[1].toUpperCase();
+    }
+    if (!result.endWord) {
+      const bottomHtml = rawHtml.match(/[Bb]ottom<\/\w+>\s*<\w+[^>]*>\s*([A-Z]{3,7})\b/);
+      if (bottomHtml) result.endWord = bottomHtml[1].toUpperCase();
     }
   },
 
   // ----- CLUE-ANSWER EXTRACTION FROM RAW HTML -----
 
-  // Fallback: extract clue-answer pairs by regex on the raw HTML string
-  // This works even when DOMParser doesn't fully render the content
   _extractClueAnswerPairsFromRawHTML(html) {
     const pairs = [];
 
     // Pattern: <td>clue text</td><td><strong>ANSWER</strong></td>
-    const tdPattern = /<td[^>]*>(.*?)<\/td>\s*<td[^>]*>\s*<strong>([A-Z]{3,7})<\/strong>/gi;
+    const tdPattern = /<td[^>]*>(.*?)<\/td>\s*<td[^>]*>\s*<strong[^>]*>([A-Za-z]{3,7})<\/strong>/gi;
     let match;
     while ((match = tdPattern.exec(html)) !== null) {
       const clue = match[1].replace(/<[^>]+>/g, '').trim();
@@ -136,13 +193,12 @@ const AnswerParser = {
       }
     }
 
-    // Pattern: "clue text" near "ANSWER" in close proximity
+    // Pattern: <strong>ANSWER</strong> near a clue <td>
     if (pairs.length < 5) {
-      const strongPattern = /<strong>([A-Z]{3,7})<\/strong>/gi;
+      const strongPattern = /<strong[^>]*>([A-Za-z]{3,7})<\/strong>/gi;
       while ((match = strongPattern.exec(html)) !== null) {
         const answer = match[1].toUpperCase();
         if (pairs.find(p => p.answer === answer)) continue;
-        // Look backwards for nearby text that could be a clue
         const before = html.substring(Math.max(0, match.index - 300), match.index);
         const clueMatch = before.match(/<td[^>]*>([^<]{5,100})<\/td>/);
         if (clueMatch) {
@@ -158,15 +214,11 @@ const AnswerParser = {
 
   _extractNextData(doc) {
     const script = doc.querySelector('script#__NEXT_DATA__');
-    if (!script) {
-      console.log('[CrossclimbSolver] No __NEXT_DATA__ script tag found');
-      return null;
-    }
+    if (!script) return null;
 
     try {
       return JSON.parse(script.textContent);
-    } catch (e) {
-      console.warn('[CrossclimbSolver] Failed to parse __NEXT_DATA__:', e);
+    } catch {
       return null;
     }
   },
@@ -176,14 +228,11 @@ const AnswerParser = {
     if (!pageProps) return;
 
     const flatText = JSON.stringify(pageProps);
-
-    // Extract start/end words
     const topMatch = flatText.match(/"top"\s*:\s*"([A-Za-z]{3,7})"/i);
     const bottomMatch = flatText.match(/"bottom"\s*:\s*"([A-Za-z]{3,7})"/i);
     if (topMatch) result.startWord = result.startWord || topMatch[1].toUpperCase();
     if (bottomMatch) result.endWord = result.endWord || bottomMatch[1].toUpperCase();
 
-    // Extract clue-answer pairs
     this._findClueAnswerPairsInObject(pageProps, result);
   },
 
@@ -199,26 +248,16 @@ const AnswerParser = {
     }
 
     if (Array.isArray(obj)) {
-      for (const item of obj) {
-        this._findClueAnswerPairsInObject(item, result, depth + 1);
-      }
+      for (const item of obj) this._findClueAnswerPairsInObject(item, result, depth + 1);
     } else {
-      for (const value of Object.values(obj)) {
-        this._findClueAnswerPairsInObject(value, result, depth + 1);
-      }
+      for (const value of Object.values(obj)) this._findClueAnswerPairsInObject(value, result, depth + 1);
     }
   },
 
-  // ----- STRATEGY 2: HTML PARSING -----
+  // ----- HTML PARSING -----
 
   _extractWordLadderFromHTML(doc) {
-    // The site shows the ladder as vertically stacked divs with Tailwind classes.
-    // Start/end words use bg-primary, middle words use bg-muted.
-    // Each word is in its own div with tracking-[0.3em] uppercase.
-
-    // Strategy A: Find styled word divs (the vertical ladder display)
-    // Look for a container with 7 children that are all uppercase words
-    // Note: words may be lowercase in HTML with CSS text-transform:uppercase
+    // Strategy A: Find a container with exactly 7 children that are uppercase words
     const allDivs = doc.querySelectorAll('div');
     for (const container of allDivs) {
       const children = container.children;
@@ -230,14 +269,19 @@ const AnswerParser = {
             words.push(text);
           }
         }
-        if (words.length >= 7 && this._isValidLadder(words)) {
-          return words;
+        if (words.length >= 7) {
+          // Try the first 7 words
+          if (this._isValidLadder(words.slice(0, 7))) return words.slice(0, 7);
+          // Try all 7-word windows
+          for (let i = 0; i <= words.length - 7; i++) {
+            if (this._isValidLadder(words.slice(i, i + 7))) return words.slice(i, i + 7);
+          }
         }
       }
     }
 
-    // Strategy B: Find words in elements with Tailwind "uppercase" or "tracking" classes
-    // These words may be lowercase in source but displayed uppercase via CSS
+    // Strategy B: Find elements with Tailwind "uppercase" or "tracking" classes
+    // These mark the word ladder display on crossclimbanswer.io
     const styledEls = doc.querySelectorAll('[class*="uppercase"], [class*="tracking"]');
     const styledWords = [];
     for (const el of styledEls) {
@@ -246,26 +290,49 @@ const AnswerParser = {
         styledWords.push(text);
       }
     }
-    if (styledWords.length >= 7 && this._isValidLadder(styledWords.slice(0, 7))) {
-      return styledWords.slice(0, 7);
+    console.log('[CrossclimbSolver] Styled words found:', styledWords.join(', '));
+
+    // Try sliding window of 7 words
+    if (styledWords.length >= 7) {
+      for (let i = 0; i <= styledWords.length - 7; i++) {
+        const slice = styledWords.slice(i, i + 7);
+        if (this._isValidLadder(slice)) return slice;
+      }
     }
 
-    // Strategy C: Look for divs with specific Tailwind-like classes
+    // Strategy C: Look for divs with border classes containing words
     const ladderWords = [];
     doc.querySelectorAll('[class*="border"]').forEach(el => {
-      const text = el.textContent.trim();
-      if (/^[A-Z]{3,7}$/.test(text)) {
+      const text = el.textContent.trim().toUpperCase();
+      if (/^[A-Z]{3,7}$/.test(text) && !ladderWords.includes(text)) {
         ladderWords.push(text);
       }
     });
-
-    // Deduplicate while preserving order
-    const unique = [...new Set(ladderWords)];
-    if (unique.length >= 7 && this._isValidLadder(unique.slice(0, 7))) {
-      return unique.slice(0, 7);
+    if (ladderWords.length >= 7) {
+      for (let i = 0; i <= ladderWords.length - 7; i++) {
+        const slice = ladderWords.slice(i, i + 7);
+        if (this._isValidLadder(slice)) return slice;
+      }
     }
 
-    return unique;
+    // Strategy D: Find all elements whose text is a single uppercase word
+    // (catches cases where class names don't contain "uppercase" after DOMParser)
+    const boldEls = doc.querySelectorAll('strong, b, [class*="bold"], [class*="font-bold"]');
+    const boldWords = [];
+    for (const el of boldEls) {
+      const text = el.textContent.trim().toUpperCase();
+      if (/^[A-Z]{3,7}$/.test(text) && !boldWords.includes(text)) {
+        boldWords.push(text);
+      }
+    }
+    if (boldWords.length >= 7) {
+      for (let i = 0; i <= boldWords.length - 7; i++) {
+        const slice = boldWords.slice(i, i + 7);
+        if (this._isValidLadder(slice)) return slice;
+      }
+    }
+
+    return styledWords.length > 0 ? styledWords : ladderWords;
   },
 
   _extractClueAnswerPairsFromHTML(doc) {
@@ -279,7 +346,6 @@ const AnswerParser = {
         const cells = row.querySelectorAll('td');
         if (cells.length >= 2) {
           const clueText = cells[0].textContent.trim();
-          // Answer might be in a <strong> tag within the cell
           const answerEl = cells[1].querySelector('strong') || cells[1];
           const answerText = answerEl.textContent.trim().toUpperCase();
 
@@ -291,15 +357,13 @@ const AnswerParser = {
     }
     if (pairs.length >= 5) return pairs;
 
-    // Strategy B: Look for <strong> tags with uppercase words near descriptive text
+    // Strategy B: Find <strong> tags with uppercase words
     const strongs = doc.querySelectorAll('strong');
     for (const strong of strongs) {
       const text = strong.textContent.trim().toUpperCase();
       if (/^[A-Z]{3,7}$/.test(text)) {
-        // Look for adjacent clue text
         const parent = strong.closest('td, li, p, div');
         if (parent) {
-          // Check previous sibling or parent for clue text
           const prevSibling = parent.previousElementSibling;
           if (prevSibling) {
             const clue = prevSibling.textContent.trim();
@@ -311,28 +375,14 @@ const AnswerParser = {
       }
     }
 
-    // Strategy C: Look for patterns like "Clue text → ANSWER" or "ANSWER: Clue text"
-    const allText = doc.body.textContent || '';
-    const patternMatches = allText.matchAll(/([A-Z]{3,7})\s*[-–—:]\s*(.{5,80}?)(?:\n|$)/g);
-    for (const match of patternMatches) {
-      const word = match[1];
-      const clue = match[2].trim();
-      if (clue.length > 5 && !/[A-Z]{3,}/.test(clue)) {
-        pairs.push({ clue, answer: word });
-      }
-    }
-
     return pairs;
   },
 
   // ----- TEXT SCAN -----
 
   _extractWordLadderFromText(allText, knownStart = null, knownEnd = null) {
-    // Find all uppercase words of the same length
-    // Also handle words that might be lowercase in source but uppercase via CSS
     const allUpperWords = allText.match(/\b[A-Z]{3,7}\b/g) || [];
 
-    // Filter out common non-answer words
     const skipWords = new Set([
       'FAQ', 'CSS', 'SEO', 'URL', 'HTML', 'JSON', 'NEXT', 'GET', 'POST',
       'HEAD', 'HTTP', 'API', 'THE', 'AND', 'FOR', 'ARE', 'BUT', 'NOT',
@@ -341,7 +391,6 @@ const AnswerParser = {
       'DID', 'HIM', 'LET', 'SAY', 'SHE', 'TOO', 'OWN', 'RSS'
     ]);
 
-    // Group by word length and find the most common length
     const byLength = {};
     for (const w of allUpperWords) {
       if (skipWords.has(w)) continue;
@@ -349,7 +398,6 @@ const AnswerParser = {
       byLength[w.length].push(w);
     }
 
-    // The puzzle word length is the one with the most unique words
     let bestLength = 0;
     let bestCount = 0;
     for (const [len, words] of Object.entries(byLength)) {
@@ -362,7 +410,6 @@ const AnswerParser = {
 
     if (!bestLength) return [];
 
-    // Get unique words of that length, in order of first appearance
     const seen = new Set();
     const candidates = [];
     for (const w of allUpperWords) {
@@ -372,53 +419,50 @@ const AnswerParser = {
       }
     }
 
-    // Try to find a valid 7-word ladder within these candidates
     return this._buildLadderFromCandidates(candidates, knownStart, knownEnd);
   },
 
   // ----- LADDER CONSTRUCTION -----
 
-  // Build a valid word ladder from candidate words
   _buildLadderFromCandidates(candidates, knownStart = null, knownEnd = null) {
     if (candidates.length < 7) return candidates;
 
-    // If we know start and end, find a path between them
     if (knownStart && knownEnd) {
       const path = this._findPath(knownStart, knownEnd, candidates);
       if (path && path.length === 7) return path;
     }
 
-    // Try every pair of candidates as start/end and find a 7-word path
-    for (let i = 0; i < candidates.length; i++) {
-      for (let j = 0; j < candidates.length; j++) {
+    for (let i = 0; i < Math.min(candidates.length, 20); i++) {
+      for (let j = 0; j < Math.min(candidates.length, 20); j++) {
         if (i === j) continue;
         const path = this._findPath(candidates[i], candidates[j], candidates);
         if (path && path.length === 7) return path;
       }
     }
 
-    // Fall back to finding the longest valid chain
     return this._findLongestChain(candidates);
   },
 
   // BFS to find a path of exactly 7 words from start to end
   _findPath(start, end, wordPool) {
-    if (start.length !== end.length) return null;
+    if (!start || !end || start.length !== end.length) return null;
 
-    const pool = new Set(wordPool);
-    pool.add(start);
-    pool.add(end);
+    const pool = new Set(wordPool.map(w => w.toUpperCase()));
+    pool.add(start.toUpperCase());
+    pool.add(end.toUpperCase());
 
-    // BFS
-    const queue = [[start]];
-    const visited = new Set([start]);
+    const startUpper = start.toUpperCase();
+    const endUpper = end.toUpperCase();
+
+    const queue = [[startUpper]];
+    const visited = new Set([startUpper]);
 
     while (queue.length > 0) {
       const path = queue.shift();
       if (path.length > 7) continue;
 
       const last = path[path.length - 1];
-      if (last === end && path.length === 7) return path;
+      if (last === endUpper && path.length === 7) return path;
       if (path.length >= 7) continue;
 
       for (const word of pool) {
@@ -432,14 +476,36 @@ const AnswerParser = {
     return null;
   },
 
-  // Find the longest chain of words differing by one letter
+  // Brute-force: try all permutations of middle answers to find valid ordering
+  _bruteForceOrder(start, end, middleAnswers) {
+    if (middleAnswers.length !== 5) return null;
+
+    // Try permutations (5! = 120, manageable)
+    const permute = (arr) => {
+      if (arr.length <= 1) return [arr];
+      const result = [];
+      for (let i = 0; i < arr.length; i++) {
+        const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+        for (const perm of permute(rest)) {
+          result.push([arr[i], ...perm]);
+        }
+      }
+      return result;
+    };
+
+    for (const perm of permute(middleAnswers)) {
+      const full = [start, ...perm, end];
+      if (this._isValidLadder(full)) return full;
+    }
+
+    return null;
+  },
+
   _findLongestChain(words) {
     let bestChain = [];
-
     for (const startWord of words) {
       const chain = [startWord];
       const used = new Set([startWord]);
-
       let current = startWord;
       while (chain.length < words.length) {
         const next = words.find(w => !used.has(w) && this._differsByOneLetter(current, w));
@@ -448,19 +514,13 @@ const AnswerParser = {
         used.add(next);
         current = next;
       }
-
-      if (chain.length > bestChain.length) {
-        bestChain = chain;
-      }
+      if (chain.length > bestChain.length) bestChain = chain;
     }
-
     return bestChain;
   },
 
-  // Reconstruct the full ladder given middle answers and start/end words
   _reconstructLadder(middleAnswers, startWord, endWord) {
     if (!startWord || !endWord) return middleAnswers;
-
     const allWords = [startWord, ...middleAnswers, endWord];
     const path = this._findPath(startWord, endWord, allWords);
     return path || allWords;
@@ -477,10 +537,12 @@ const AnswerParser = {
   },
 
   _differsByOneLetter(word1, word2) {
-    if (word1.length !== word2.length) return false;
+    if (!word1 || !word2 || word1.length !== word2.length) return false;
+    const a = word1.toUpperCase();
+    const b = word2.toUpperCase();
     let diffs = 0;
-    for (let i = 0; i < word1.length; i++) {
-      if (word1[i] !== word2[i]) diffs++;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) diffs++;
       if (diffs > 1) return false;
     }
     return diffs === 1;
@@ -497,8 +559,7 @@ const AnswerParser = {
     const { wordLadder, clueAnswerPairs } = result;
 
     if (wordLadder.length > 0 && !this._isValidLadder(wordLadder)) {
-      console.warn('[CrossclimbSolver] Word ladder validation FAILED - consecutive words differ by more than one letter');
-      // Log which steps fail
+      console.warn('[CrossclimbSolver] Word ladder validation FAILED');
       for (let i = 0; i < wordLadder.length - 1; i++) {
         if (!this._differsByOneLetter(wordLadder[i], wordLadder[i + 1])) {
           console.warn(`  Step ${i + 1}: "${wordLadder[i]}" → "${wordLadder[i + 1]}" (invalid)`);
@@ -508,7 +569,6 @@ const AnswerParser = {
       console.log('[CrossclimbSolver] Word ladder validation PASSED');
     }
 
-    // Validate that answers appear in the word ladder
     for (const pair of clueAnswerPairs) {
       if (wordLadder.length > 0 && !wordLadder.includes(pair.answer)) {
         console.warn(`[CrossclimbSolver] Answer "${pair.answer}" not found in word ladder`);
@@ -518,12 +578,10 @@ const AnswerParser = {
 
   // ----- PUBLIC HELPERS -----
 
-  // Get the correct top-to-bottom ordering for the 5 middle answers
   getMiddleAnswersOrdered(result) {
     if (result.wordLadder.length >= 7) {
       return result.wordLadder.slice(1, 6);
     }
-    // Fallback: try to order clue answers to form a valid ladder
     return this._findLongestChain(result.clueAnswerPairs.map(p => p.answer));
   }
 };

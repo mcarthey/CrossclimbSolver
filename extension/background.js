@@ -16,6 +16,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
   }
+
+  // Broadcast a message to all frames in the sender's tab
+  if (message.type === 'BROADCAST_TO_FRAMES') {
+    if (sender.tab?.id) {
+      chrome.tabs.sendMessage(sender.tab.id, message.payload, (response) => {
+        if (chrome.runtime.lastError) {
+          sendResponse(null);
+        } else {
+          sendResponse(response);
+        }
+      });
+      return true;
+    }
+    sendResponse(null);
+    return;
+  }
+
+  // Relay GAME_FRAME_READY to the top frame
+  if (message.type === 'GAME_FRAME_READY') {
+    if (sender.tab?.id) {
+      console.log('[CrossclimbSolver BG] Game frame ready in tab', sender.tab.id, message);
+    }
+    return;
+  }
 });
 
 // Fetch the homepage to discover the latest puzzle number

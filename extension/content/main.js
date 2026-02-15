@@ -6,10 +6,13 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
+  const VERSION = '1.1.0';
 
   // State
   let puzzleData = null;
   let isInitialized = false;
+  let isTopFrame = false;
+  let gameRowsFoundInThisFrame = false;
 
   // ----- INITIALIZATION -----
 
@@ -17,43 +20,63 @@
     if (isInitialized) return;
     isInitialized = true;
 
-    const isTopFrame = (window === window.top);
-    console.log(`${LOG_PREFIX} Initializing on ${window.location.href} (${isTopFrame ? 'top frame' : 'iframe'})`);
+    isTopFrame = (window === window.top);
+    console.log(`${LOG_PREFIX} v${VERSION} Initializing on ${window.location.href} (${isTopFrame ? 'top frame' : 'iframe'})`);
 
-    // Only create the overlay on the top-level frame
-    if (!isTopFrame) {
-      console.log(`${LOG_PREFIX} Skipping overlay in iframe`);
-      return;
-    }
+    if (isTopFrame) {
+      // --- TOP FRAME: overlay, answer fetching, orchestration ---
+      Overlay.create();
+      Overlay.show();
+      Overlay.log(`Extension v${VERSION} loaded. Ready to solve.`);
 
-    // Create and show the overlay
-    Overlay.create();
-    Overlay.show();
-    Overlay.log('Extension loaded. Ready to solve.');
+      Overlay.onSolve(handleSolve);
+      Overlay.onInspect(handleInspect);
 
-    // Wire up overlay callbacks
-    Overlay.onSolve(handleSolve);
-    Overlay.onInspect(handleInspect);
+      // Automatically fetch today's answers
+      try {
+        Overlay.setStatus('fetching', 'Fetching answers...');
+        Overlay.log('Fetching latest puzzle from crossclimbanswer.io...');
 
-    // Automatically fetch today's answers
-    try {
-      Overlay.setStatus('fetching', 'Fetching answers...');
-      Overlay.log('Fetching latest puzzle from crossclimbanswer.io...');
+        puzzleData = await fetchAndParseAnswers();
 
-      puzzleData = await fetchAndParseAnswers();
-
-      if (puzzleData) {
-        Overlay.setPuzzleInfo(puzzleData);
-        Overlay.setStatus('idle', 'Answers loaded. Click "Solve Puzzle" to start.');
-        Overlay.log(`Loaded puzzle #${puzzleData.puzzleNumber}: ${puzzleData.wordLadder.join(' → ')}`);
-      } else {
-        Overlay.setStatus('error', 'Could not parse answers');
-        Overlay.log('Error: Failed to parse answer data');
+        if (puzzleData) {
+          Overlay.setPuzzleInfo(puzzleData);
+          Overlay.setStatus('idle', 'Answers loaded. Click "Solve Puzzle" to start.');
+          Overlay.log(`Loaded puzzle #${puzzleData.puzzleNumber}: ${puzzleData.wordLadder.join(' → ')}`);
+        } else {
+          Overlay.setStatus('error', 'Could not parse answers');
+          Overlay.log('Error: Failed to parse answer data');
+        }
+      } catch (error) {
+        console.error(`${LOG_PREFIX} Init error:`, error);
+        Overlay.setStatus('error', 'Failed to fetch answers');
+        Overlay.log(`Error: ${error.message}`);
       }
-    } catch (error) {
-      console.error(`${LOG_PREFIX} Init error:`, error);
-      Overlay.setStatus('error', 'Failed to fetch answers');
-      Overlay.log(`Error: ${error.message}`);
+    } else {
+      // --- IFRAME: check for game content, register as game frame ---
+      console.log(`${LOG_PREFIX} Iframe instance - scanning for puzzle rows...`);
+
+      // Give React a moment to render in the iframe
+      await new Promise(r => setTimeout(r, 2000));
+
+      const localRows = Solver._findRows(document, document.body);
+      console.log(`${LOG_PREFIX} Iframe found ${localRows.length} puzzle rows`);
+
+      if (localRows.length >= 3) {
+        gameRowsFoundInThisFrame = true;
+        console.log(`${LOG_PREFIX} Game found in this iframe! Registering as game frame.`);
+
+        // Notify the top frame that we have the game
+        try {
+          chrome.runtime.sendMessage({
+            type: 'GAME_FRAME_READY',
+            rowCount: localRows.length,
+            url: window.location.href
+          });
+        } catch (e) {
+          console.log(`${LOG_PREFIX} Could not send GAME_FRAME_READY:`, e.message);
+        }
+      }
     }
   }
 
@@ -105,17 +128,64 @@
 
     Overlay.log('Starting solver...');
 
-    await Solver.solve(puzzleData, {
-      onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
-      onLog: (msg) => Overlay.log(msg),
-      onError: (error) => {
-        Overlay.log(`Error: ${error.message}`);
-        console.error(`${LOG_PREFIX} Solver error:`, error);
-      },
-      onComplete: () => {
-        Overlay.log('Puzzle solved successfully!');
+    // First try solving locally (main frame + accessible iframes)
+    const domInfo = await Solver._discoverDOM();
+
+    if (domInfo.rows.length >= 3) {
+      // Found rows locally — solve directly
+      await Solver.solve(puzzleData, {
+        onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
+        onLog: (msg) => Overlay.log(msg),
+        onError: (error) => {
+          Overlay.log(`Error: ${error.message}`);
+          console.error(`${LOG_PREFIX} Solver error:`, error);
+        },
+        onComplete: () => {
+          Overlay.log('Puzzle solved successfully!');
+        }
+      });
+    } else {
+      // No rows found locally — try asking iframe instances
+      Overlay.log('No rows in main frame. Asking iframe instances...');
+
+      try {
+        const response = await sendMessageToAllFrames({
+          type: 'SOLVE_IN_FRAME',
+          puzzleData: puzzleData
+        });
+
+        if (response && response.success) {
+          Overlay.log('Solve completed via iframe!');
+          Overlay.setStatus('done', 'Puzzle solved!');
+        } else {
+          Overlay.log('Iframe solve failed or no game iframe found.');
+          // Fall through to show diagnostics
+          await Solver.solve(puzzleData, {
+            onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
+            onLog: (msg) => Overlay.log(msg),
+            onError: (error) => {
+              Overlay.log(`Error: ${error.message}`);
+            },
+            onComplete: () => {
+              Overlay.log('Puzzle solved successfully!');
+            }
+          });
+        }
+      } catch (e) {
+        Overlay.log(`Iframe communication failed: ${e.message}`);
+        // Fall through to regular solve which will show diagnostics
+        await Solver.solve(puzzleData, {
+          onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
+          onLog: (msg) => Overlay.log(msg),
+          onError: (error) => {
+            Overlay.log(`Error: ${error.message}`);
+          },
+          onComplete: () => {
+            Overlay.log('Puzzle solved successfully!');
+          }
+        });
       }
-    });
+    }
   }
 
   // ----- INSPECT HANDLER -----
@@ -136,6 +206,11 @@
     Overlay.log(`Found ${report.draggables.length} draggable element(s)`);
     Overlay.log(`Found ${report.buttons.length} game button(s)`);
 
+    // Show details of found rows
+    for (const row of report.rows) {
+      Overlay.log(`  Row: letters="${row.letters || ''}" class="${(row.className || '').substring(0, 60)}" ${row.matchedSelector || ''}`);
+    }
+
     // Also inspect accessible iframes
     const iframes = document.querySelectorAll('iframe');
     for (const iframe of iframes) {
@@ -146,24 +221,35 @@
         const src = iframe.src?.substring(0, 60) || '(no src)';
         Overlay.log(`--- iframe: ${src} ---`);
 
-        // Quick row scan in this iframe
         const iframeRows = Solver._findRows(iframeDoc, iframeDoc.body);
         Overlay.log(`  Puzzle rows: ${iframeRows.length}`);
         for (const row of iframeRows) {
           Overlay.log(`    Row: "${row.currentLetters}" locked=${row.isLocked} draggable=${row.draggable}`);
         }
 
-        // Quick keyboard scan
         const iframeKeyboard = Solver._findKeyboard(iframeDoc);
         Overlay.log(`  Keyboard: ${iframeKeyboard ? 'found' : 'not found'}`);
 
       } catch (e) {
         const src = iframe.src?.substring(0, 60) || '(no src)';
-        Overlay.log(`--- iframe: ${src} (cross-origin, cannot access) ---`);
+        Overlay.log(`--- iframe: ${src} (cross-origin) ---`);
       }
     }
 
-    // Also run the solver's diagnostic function
+    // Ask iframe instances for their row counts
+    Overlay.log('--- Asking iframe instances ---');
+    try {
+      const iframeReports = await sendMessageToAllFrames({ type: 'DISCOVER_ROWS' });
+      if (iframeReports) {
+        Overlay.log(`Iframe response: ${JSON.stringify(iframeReports).substring(0, 200)}`);
+      } else {
+        Overlay.log('No iframe responses received');
+      }
+    } catch (e) {
+      Overlay.log(`Iframe query failed: ${e.message}`);
+    }
+
+    // Run solver's diagnostic function
     Overlay.log('--- Solver diagnostics ---');
     const domInfo = await Solver._discoverDOM();
     Overlay.log(`Solver found ${domInfo.rows.length} puzzle rows (isInIframe=${domInfo.isInIframe})`);
@@ -172,10 +258,23 @@
     }
     Overlay.log(`Keyboard: ${domInfo.keyboard ? 'found' : 'not found'}`);
 
+    // Show diagnostics if no rows found
+    if (domInfo.diagnostics) {
+      Overlay.log(`  Single-letter elements: ${domInfo.diagnostics.singleLetterCount}`);
+      for (const p of domInfo.diagnostics.parentSamples) {
+        Overlay.log(`  Parent: <${p.tag}> letters="${p.letters}" txtLen=${p.textLength}`);
+      }
+      for (const d of domInfo.diagnostics.draggables.slice(0, 5)) {
+        Overlay.log(`  Draggable: "${d.text}" letters="${d.childLetters}"`);
+      }
+      for (const f of domInfo.diagnostics.iframes) {
+        Overlay.log(`  iframe: ${f.src} accessible=${f.accessible}`);
+      }
+    }
+
     Overlay.setStatus('idle', 'Inspection complete. Check browser console for full report.');
     Overlay.log('Full report logged to browser console (F12 → Console)');
 
-    // Expose to page console via injected script (bypasses content script isolated world)
     exposeToPageConsole('__crossclimbInspection', report);
     console.log(`${LOG_PREFIX} Inspection report available as window.__crossclimbInspection`);
   }
@@ -210,10 +309,28 @@
     });
   }
 
-  // Listen for messages from the popup
+  // Send a message to all frames via background and get the first positive response
+  function sendMessageToAllFrames(message) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ type: 'BROADCAST_TO_FRAMES', payload: message }, (response) => {
+          if (chrome.runtime.lastError) {
+            resolve(null);
+          } else {
+            resolve(response);
+          }
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  // Listen for messages from the popup AND from other frames
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // --- Messages from popup ---
     if (message.type === 'GET_STATUS') {
-      sendResponse({ puzzleData });
+      sendResponse({ puzzleData, version: VERSION });
       return;
     }
     if (message.type === 'SOLVE') {
@@ -236,47 +353,64 @@
       sendResponse({ ok: true });
       return;
     }
+
+    // --- Messages for iframe game frames ---
+    if (message.type === 'DISCOVER_ROWS') {
+      // Only respond from iframe instances
+      if (!isTopFrame) {
+        const rows = Solver._findRows(document, document.body);
+        sendResponse({
+          frameUrl: window.location.href,
+          rowCount: rows.length,
+          rows: rows.map(r => ({ letters: r.currentLetters, locked: r.isLocked, draggable: r.draggable }))
+        });
+      }
+      return;
+    }
+
+    if (message.type === 'SOLVE_IN_FRAME') {
+      // Only handle in iframe instances that have game rows
+      if (!isTopFrame && gameRowsFoundInThisFrame) {
+        console.log(`${LOG_PREFIX} Solving in iframe...`);
+        const pd = message.puzzleData;
+        Solver.solve(pd, {
+          onStatus: (phase, msg) => console.log(`${LOG_PREFIX} [${phase}] ${msg}`),
+          onLog: (msg) => console.log(`${LOG_PREFIX} ${msg}`),
+          onError: (error) => console.error(`${LOG_PREFIX} Error:`, error),
+          onComplete: () => console.log(`${LOG_PREFIX} Solve complete in iframe`)
+        }).then(() => {
+          sendResponse({ success: true });
+        }).catch(e => {
+          sendResponse({ success: false, error: e.message });
+        });
+        return true; // Keep channel open for async response
+      }
+      return;
+    }
   });
 
   // ----- CONSOLE API -----
 
-  // Expose utility functions for manual debugging/testing
   window.CrossclimbSolver = {
-    // Re-run initialization
+    version: VERSION,
     init,
-
-    // Get the loaded puzzle data
     getPuzzleData: () => puzzleData,
-
-    // Manually trigger solve
     solve: handleSolve,
-
-    // Run DOM inspection
     inspect: handleInspect,
-
-    // Show/hide the overlay
     showOverlay: () => Overlay.show(),
     hideOverlay: () => Overlay.hide(),
-
-    // Manually set puzzle data (for testing)
     setPuzzleData: (data) => {
       puzzleData = data;
-      Overlay.setPuzzleInfo(data);
+      if (isTopFrame) Overlay.setPuzzleInfo(data);
     },
-
-    // Access sub-modules
     DOM: CrossclimbDOM,
     Parser: AnswerParser,
     Inspector: DOMInspector,
     Solver: Solver,
     Overlay: Overlay,
 
-    // Quick test: type a word using different strategies
     async testType(word) {
       console.log(`${LOG_PREFIX} Test typing: "${word}"`);
-
-      // Strategy 1: Keyboard events to document
-      console.log('Strategy 1: Keyboard events to document');
       for (const char of word) {
         const key = char.toUpperCase();
         document.dispatchEvent(new KeyboardEvent('keydown', {
@@ -291,7 +425,6 @@
       }
     },
 
-    // Quick test: find and log all interactive elements
     testInteractive() {
       const elements = document.querySelectorAll(
         'button, [role="button"], input, [tabindex], [contenteditable], [draggable]'
@@ -310,13 +443,11 @@
 
   // ----- START -----
 
-  // Wait for the page to be ready, then initialize
   if (document.readyState === 'complete') {
-    // Small delay to let React render
     setTimeout(init, 1500);
   } else {
     window.addEventListener('load', () => setTimeout(init, 1500));
   }
 
-  console.log(`${LOG_PREFIX} Content script loaded. API available at window.CrossclimbSolver`);
+  console.log(`${LOG_PREFIX} v${VERSION} Content script loaded (${window === window.top ? 'top' : 'iframe'}). API: window.CrossclimbSolver`);
 })();

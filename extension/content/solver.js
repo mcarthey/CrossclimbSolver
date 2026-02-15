@@ -57,7 +57,21 @@ const Solver = {
       log(`Found ${domInfo.rows.length} puzzle rows`);
 
       if (domInfo.rows.length === 0) {
-        throw new Error('Could not find puzzle rows in the DOM. Run DOMInspector.inspect() in the console for details.');
+        // Surface diagnostics in the overlay
+        if (domInfo.diagnostics) {
+          const d = domInfo.diagnostics;
+          log(`DIAGNOSTICS: ${d.singleLetterCount} single-letter elements found`);
+          for (const p of d.parentSamples) {
+            log(`  Parent: <${p.tag}> letters="${p.letters}" (${p.count}) textLen=${p.textLength}`);
+          }
+          for (const dr of d.draggables.slice(0, 5)) {
+            log(`  Draggable: "${dr.text}" childLetters="${dr.childLetters}"`);
+          }
+          for (const iframe of d.iframes) {
+            log(`  iframe: ${iframe.src} accessible=${iframe.accessible}`);
+          }
+        }
+        throw new Error('Could not find puzzle rows in the DOM. Check diagnostics above.');
       }
 
       // Step 2: Read clues from the DOM
@@ -161,53 +175,77 @@ const Solver = {
     // If still no rows, log diagnostic info
     if (info.rows.length === 0) {
       console.warn('[CrossclimbSolver] No puzzle rows found in any frame!');
-      this._logDiagnostics(document);
+      info.diagnostics = this._logDiagnostics(document);
     }
 
     return info;
   },
 
   // Log diagnostics when we can't find the game
+  // Returns a report object so the overlay can display it
   _logDiagnostics(doc) {
+    const report = { singleLetterCount: 0, parentSamples: [], draggables: [], iframes: [] };
     console.log('[CrossclimbSolver] === DIAGNOSTICS ===');
 
-    // Count elements with single-letter text content at various depths
-    const singleLetterEls = doc.querySelectorAll('*');
-    let singleLetterCount = 0;
-    const sampleParents = new Set();
-    for (const el of singleLetterEls) {
-      if (el.children.length === 0 && /^[A-Z]$/i.test(el.textContent.trim())) {
-        singleLetterCount++;
-        if (sampleParents.size < 10 && el.parentElement) {
-          sampleParents.add(el.parentElement);
+    // Count elements with single-letter text content (both leaf and non-leaf)
+    const allEls = doc.querySelectorAll('*');
+    let leafLetterCount = 0;
+    let textContentLetterCount = 0;
+    const leafParents = new Set();
+    const textParents = new Set();
+
+    for (const el of allEls) {
+      const trimmed = el.textContent.trim();
+      if (/^[A-Z]$/i.test(trimmed)) {
+        textContentLetterCount++;
+        if (textParents.size < 10 && el.parentElement) textParents.add(el.parentElement);
+        if (el.children.length === 0) {
+          leafLetterCount++;
+          if (leafParents.size < 10 && el.parentElement) leafParents.add(el.parentElement);
         }
       }
     }
-    console.log(`[CrossclimbSolver] Found ${singleLetterCount} single-letter leaf elements`);
 
-    // Show sample parents of single-letter elements
-    for (const parent of sampleParents) {
+    console.log(`[CrossclimbSolver] Single-letter elements: ${textContentLetterCount} total, ${leafLetterCount} leaf nodes`);
+    report.singleLetterCount = textContentLetterCount;
+
+    // Show parents that have 3+ single-letter children (textContent-based)
+    console.log('[CrossclimbSolver] Parents with 3+ single-letter children (textContent):');
+    for (const parent of textParents) {
+      const letters = [...parent.children]
+        .filter(c => /^[A-Z]$/i.test(c.textContent.trim()))
+        .map(c => c.textContent.trim());
+      if (letters.length >= 3) {
+        const info = `<${parent.tagName}> class="${(parent.className?.toString() || '').substring(0, 100)}" letters="${letters.join('')}" (${letters.length})`;
+        console.log(`[CrossclimbSolver]   ${info}`);
+        report.parentSamples.push({ tag: parent.tagName, className: (parent.className?.toString() || '').substring(0, 100), letters: letters.join(''), count: letters.length, textLength: parent.textContent.trim().length });
+      }
+    }
+
+    // Also show leaf-node parents
+    console.log('[CrossclimbSolver] Parents with 3+ single-letter LEAF children:');
+    for (const parent of leafParents) {
       const letters = [...parent.children]
         .filter(c => c.children.length === 0 && /^[A-Z]$/i.test(c.textContent.trim()))
         .map(c => c.textContent.trim());
-      console.log(`[CrossclimbSolver]   Parent: <${parent.tagName}> class="${(parent.className?.toString() || '').substring(0, 80)}" children-letters: ${letters.join('')} (${letters.length} letters)`);
-
-      // Also check grandparent
-      const gp = parent.parentElement;
-      if (gp) {
-        console.log(`[CrossclimbSolver]     Grandparent: <${gp.tagName}> class="${(gp.className?.toString() || '').substring(0, 80)}" children: ${gp.children.length}`);
+      if (letters.length >= 3) {
+        console.log(`[CrossclimbSolver]   <${parent.tagName}> class="${(parent.className?.toString() || '').substring(0, 100)}" letters="${letters.join('')}" (${letters.length})`);
       }
     }
 
     // Check draggable elements
     const draggables = doc.querySelectorAll('[draggable="true"]');
     console.log(`[CrossclimbSolver] Draggable elements: ${draggables.length}`);
-    for (const d of [...draggables].slice(0, 5)) {
-      console.log(`[CrossclimbSolver]   <${d.tagName}> class="${(d.className?.toString() || '').substring(0, 80)}" text="${d.textContent.trim().substring(0, 60)}"`);
+    for (const d of [...draggables].slice(0, 10)) {
+      const childLetters = [...d.children].filter(c => /^[A-Z]$/i.test(c.textContent.trim())).map(c => c.textContent.trim());
+      const info = `<${d.tagName}> class="${(d.className?.toString() || '').substring(0, 80)}" text="${d.textContent.trim().substring(0, 60)}" childLetters="${childLetters.join('')}"`;
+      console.log(`[CrossclimbSolver]   ${info}`);
+      report.draggables.push({ tag: d.tagName, text: d.textContent.trim().substring(0, 60), childLetters: childLetters.join('') });
     }
 
     // List all iframes with access status
     const iframes = doc.querySelectorAll('iframe');
+    console.log(`[CrossclimbSolver] Iframes: ${iframes.length}`);
     for (const iframe of iframes) {
       let accessible = false;
       let bodyChildCount = 0;
@@ -216,10 +254,13 @@ const Solver = {
         accessible = !!idoc;
         bodyChildCount = idoc?.body?.children?.length || 0;
       } catch { /* cross-origin */ }
-      console.log(`[CrossclimbSolver]   iframe src="${(iframe.src || '').substring(0, 80)}" accessible=${accessible} bodyChildren=${bodyChildCount}`);
+      const info = `src="${(iframe.src || '').substring(0, 100)}" accessible=${accessible} bodyChildren=${bodyChildCount}`;
+      console.log(`[CrossclimbSolver]   ${info}`);
+      report.iframes.push({ src: (iframe.src || '').substring(0, 100), accessible, bodyChildCount });
     }
 
     console.log('[CrossclimbSolver] === END DIAGNOSTICS ===');
+    return report;
   },
 
   _findGameContainer(doc) {
@@ -255,10 +296,14 @@ const Solver = {
 
     for (const el of allElements) {
       const text = el.textContent.trim();
-      if (text.length > 500 || text.length === 0) continue;
+      // Generous guard: skip only very large or empty elements
+      if (text.length > 5000 || text.length === 0) continue;
 
       const children = el.children;
       if (children.length < 2) continue;
+
+      // Skip if we already found this element as a row
+      if (rows.find(r => r.element === el)) continue;
 
       // --- Strategy 1: class-name based cell lookup ---
       const letterEls = el.querySelectorAll(
@@ -271,45 +316,56 @@ const Solver = {
         continue;
       }
 
-      // --- Strategy 2: direct children are single uppercase letters ---
+      // --- Strategy 2: direct children whose textContent is a single letter ---
+      // (does NOT require children to be leaf nodes — matches DOMInspector approach)
       const charChildren = [...children].filter(c =>
-        /^[A-Z]$/i.test(c.textContent.trim()) && c.children.length === 0
+        /^[A-Z]$/i.test(c.textContent.trim())
       );
-      if (charChildren.length >= 3) {
+      if (charChildren.length >= 3 && charChildren.length <= 8) {
         rows.push(this._makeRow(el, charChildren));
         continue;
       }
 
-      // --- Strategy 3: grandchildren are single letters ---
-      // e.g. <row><wrapper><span>M</span><span>E</span>...</wrapper></row>
+      // --- Strategy 3: grandchildren whose textContent is a single letter ---
       for (const child of children) {
+        if (child.children.length < 2) continue;
         const grandcharChildren = [...child.children].filter(gc =>
-          /^[A-Z]$/i.test(gc.textContent.trim()) && gc.children.length === 0
+          /^[A-Z]$/i.test(gc.textContent.trim())
         );
-        if (grandcharChildren.length >= 3) {
+        if (grandcharChildren.length >= 3 && grandcharChildren.length <= 8) {
           rows.push(this._makeRow(el, grandcharChildren));
-          break; // Don't double-count this row
+          break;
         }
       }
+      if (rows.find(r => r.element === el)) continue;
 
       // --- Strategy 4: leaf descendants are single letters (any depth) ---
-      // Find all leaf text nodes that are single uppercase letters
-      if (!rows.find(r => r.element === el)) {
-        const leafLetters = [];
-        const walk = (node) => {
-          if (node.children.length === 0) {
-            const t = node.textContent.trim();
-            if (/^[A-Z]$/i.test(t)) leafLetters.push(node);
-          } else {
-            for (const c of node.children) walk(c);
-          }
-        };
-        walk(el);
+      const leafLetters = [];
+      const walk = (node) => {
+        if (node.children.length === 0) {
+          const t = node.textContent.trim();
+          if (/^[A-Z]$/i.test(t)) leafLetters.push(node);
+        } else {
+          for (const c of node.children) walk(c);
+        }
+      };
+      walk(el);
+      if (leafLetters.length >= 3 && leafLetters.length <= 8 && text.length < 2000) {
+        rows.push(this._makeRow(el, leafLetters));
+        continue;
+      }
 
-        // Only count if we have 3-8 leaf letter elements AND the element isn't too big
-        // (to avoid matching the entire page body)
-        if (leafLetters.length >= 3 && leafLetters.length <= 8 && text.length < 200) {
-          rows.push(this._makeRow(el, leafLetters));
+      // --- Strategy 5: aria-label or data attributes suggest a game row ---
+      const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+      const role = el.getAttribute('role') || '';
+      if ((ariaLabel.includes('row') || ariaLabel.includes('word') || ariaLabel.includes('clue') ||
+           role === 'row' || role === 'listitem') && children.length >= 2) {
+        // This element looks like a game row — check if it contains letters
+        const allTextChildren = [...el.querySelectorAll('*')].filter(c =>
+          c.children.length === 0 && /^[A-Z]$/i.test(c.textContent.trim())
+        );
+        if (allTextChildren.length >= 3 && allTextChildren.length <= 8) {
+          rows.push(this._makeRow(el, allTextChildren));
         }
       }
     }
@@ -320,8 +376,18 @@ const Solver = {
       if (rows.find(r => r.element === el || r.element.contains(el) || el.contains(r.element))) continue;
 
       const text = el.textContent.trim();
-      if (text.length > 200 || text.length === 0) continue;
+      if (text.length > 2000 || text.length === 0) continue;
 
+      // Check direct children textContent first (non-leaf approach)
+      const charChildren = [...el.children].filter(c =>
+        /^[A-Z]$/i.test(c.textContent.trim())
+      );
+      if (charChildren.length >= 3 && charChildren.length <= 8) {
+        rows.push(this._makeRow(el, charChildren));
+        continue;
+      }
+
+      // Leaf node approach
       const leafLetters = [];
       const walk = (node) => {
         if (node.children.length === 0) {
