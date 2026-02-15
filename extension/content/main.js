@@ -6,7 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
 
   // State
   let puzzleData = null;
@@ -319,6 +319,22 @@
         } else {
           Overlay.log(`  <${ge.tag}> "${ge.text.substring(0, 60)}" class="${(ge.className || '').substring(0, 50)}" role=${ge.role || ''} drag=${ge.draggable}`);
         }
+      }
+    }
+
+    if (deepReport.crossclimbElements) {
+      Overlay.log(`--- Crossclimb game elements: ${deepReport.crossclimbElements.length} ---`);
+      for (const el of deepReport.crossclimbElements.slice(0, 25)) {
+        Overlay.log(`  <${el.tag}> class="${(el.className || '').substring(0, 80)}" children=${el.childCount} text="${el.text.substring(0, 50)}" ${el.rect.width}x${el.rect.height}`);
+      }
+    }
+
+    if (deepReport.gameTree?.length > 0) {
+      Overlay.log(`--- Game DOM tree (${deepReport.gameTree.length} nodes) ---`);
+      for (const node of deepReport.gameTree.slice(0, 40)) {
+        const indent = '  '.repeat(node.depth);
+        const cls = (node.className || '').split(' ').filter(c => c.match(/game|crossclimb|board|row|cell|clue|rung|ladder/i)).join(' ') || (node.className || '').substring(0, 40);
+        Overlay.log(`${indent}<${node.tag}> ${cls} ch=${node.childCount} ${node.rect.width}x${node.rect.height} vis=${node.visible} txt=${node.textLen}`);
       }
     }
 

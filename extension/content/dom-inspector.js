@@ -556,6 +556,59 @@ const DOMInspector = {
       }
     }
 
+    // Targeted search: find ALL elements with crossclimb/pr-game class names
+    // This reveals the full game DOM structure
+    report.crossclimbElements = [];
+    const ccEls = document.querySelectorAll('[class*="crossclimb"], [class*="pr-game"], [class*="game-board"], [class*="board-container"]');
+    for (const el of ccEls) {
+      if (overlayEl && overlayEl.contains(el)) continue;
+      report.crossclimbElements.push({
+        tag: el.tagName.toLowerCase(),
+        className: this._truncate(el.className?.toString(), 150),
+        text: this._truncate(el.textContent.trim(), 100),
+        childCount: el.children.length,
+        childTags: [...el.children].slice(0, 10).map(c => `${c.tagName.toLowerCase()}.${(c.className?.toString() || '').split(' ')[0] || '?'}`).join(', '),
+        rect: this._getRect(el),
+        style: el.style?.cssText?.substring(0, 100) || '',
+        dataset: Object.keys(el.dataset).length > 0 ? { ...el.dataset } : undefined,
+        ariaLabel: el.getAttribute('aria-label'),
+        role: el.getAttribute('role'),
+      });
+    }
+
+    // Also dump the main game container tree (find element with pr-game-web or crossclimb in class, walk its immediate subtree)
+    report.gameTree = [];
+    const gameRoot = document.querySelector('[class*="pr-game-web"]') || document.querySelector('[class*="crossclimb"]');
+    if (gameRoot) {
+      // Walk up to find the outermost game container
+      let outerGame = gameRoot;
+      while (outerGame.parentElement && (outerGame.parentElement.className?.toString() || '').match(/game|crossclimb/i)) {
+        outerGame = outerGame.parentElement;
+      }
+
+      // Dump tree structure (first 3 levels)
+      const dumpTree = (el, depth = 0) => {
+        if (depth > 3) return;
+        if (overlayEl && overlayEl.contains(el)) return;
+        const className = el.className?.toString() || '';
+        const text = el.textContent.trim();
+        report.gameTree.push({
+          depth,
+          tag: el.tagName.toLowerCase(),
+          className: this._truncate(className, 120),
+          textLen: text.length,
+          textPreview: this._truncate(text, depth < 2 ? 40 : 60),
+          childCount: el.children.length,
+          rect: this._getRect(el),
+          visible: el.offsetWidth > 0 && el.offsetHeight > 0,
+        });
+        for (const child of el.children) {
+          dumpTree(child, depth + 1);
+        }
+      };
+      dumpTree(outerGame);
+    }
+
     console.log('[CrossclimbSolver] Deep Scan Report:', report);
     return report;
   },
