@@ -6,7 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
 
   // State
   let puzzleData = null;
@@ -129,7 +129,8 @@
     Overlay.log('Starting solver...');
 
     // First try solving locally (main frame + accessible iframes + shadow DOM)
-    const domInfo = await Solver._discoverDOM();
+    // Pass puzzleData so word-row detection can search for answer words
+    const domInfo = await Solver._discoverDOM(puzzleData);
 
     if (domInfo.rows.length >= 3 || domInfo.wordRows.length >= 3) {
       // Found rows locally — solve directly
@@ -251,7 +252,7 @@
 
     // Run solver's diagnostic function
     Overlay.log('--- Solver diagnostics ---');
-    const domInfo = await Solver._discoverDOM();
+    const domInfo = await Solver._discoverDOM(puzzleData);
     Overlay.log(`Solver found ${domInfo.rows.length} puzzle rows (isInIframe=${domInfo.isInIframe})`);
     for (const row of domInfo.rows) {
       Overlay.log(`  Row: "${row.currentLetters}" locked=${row.isLocked} text="${row.text.substring(0, 60)}"`);
@@ -308,6 +309,17 @@
     Overlay.log(`Button details (${deepReport.buttonDetails.length}):`);
     for (const b of deepReport.buttonDetails.slice(0, 15)) {
       Overlay.log(`  "${b.text.substring(0, 40)}" disabled=${b.disabled} aria="${b.ariaLabel || ''}"`);
+    }
+
+    if (deepReport.gameElements) {
+      Overlay.log(`Game elements (outside overlay): ${deepReport.gameElements.length}`);
+      for (const ge of deepReport.gameElements.slice(0, 20)) {
+        if (ge.type === 'word-candidate') {
+          Overlay.log(`  WORD: "${ge.text}" in <${ge.tag}> parent=<${ge.parentTag}> class="${ge.parentClass?.substring(0, 50) || ''}"`);
+        } else {
+          Overlay.log(`  <${ge.tag}> "${ge.text.substring(0, 60)}" class="${(ge.className || '').substring(0, 50)}" role=${ge.role || ''} drag=${ge.draggable}`);
+        }
+      }
     }
 
     Overlay.setStatus('idle', 'Inspection complete. Check browser console for full report.');
