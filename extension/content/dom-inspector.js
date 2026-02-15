@@ -365,6 +365,7 @@ const DOMInspector = {
     };
 
     const answerWordsUpper = answerWords.map(w => w.toUpperCase());
+    const overlayEl = document.getElementById('crossclimb-solver-overlay');
 
     // Walk entire DOM tree including shadow roots
     const walkDOM = (root, path = 'document') => {
@@ -372,6 +373,9 @@ const DOMInspector = {
       report.totalElements += allEls.length;
 
       for (const el of allEls) {
+        // Skip our own overlay to avoid false positives
+        if (overlayEl && (el === overlayEl || overlayEl.contains(el))) continue;
+
         // Check for shadow root
         if (el.shadowRoot) {
           const childCount = el.shadowRoot.childNodes.length;
@@ -491,6 +495,66 @@ const DOMInspector = {
         });
       }
     });
+
+    // Search for game-specific elements outside our overlay
+    // Look for: clue text, interactive rows, game board structure
+    report.gameElements = [];
+    const allEls = document.querySelectorAll('*');
+    for (const el of allEls) {
+      if (overlayEl && (el === overlayEl || overlayEl.contains(el))) continue;
+
+      const text = el.textContent.trim();
+      const className = el.className?.toString() || '';
+
+      // Look for elements that might be game rows (have clue-like text 10-100 chars)
+      if (el.children.length <= 5 && text.length >= 10 && text.length <= 200) {
+        const lcClass = className.toLowerCase();
+        const lcText = text.toLowerCase();
+
+        // Game-related: contains clue-like content or game class names
+        const isGameRelated = lcClass.includes('game') || lcClass.includes('puzzle') ||
+          lcClass.includes('clue') || lcClass.includes('row') || lcClass.includes('word') ||
+          lcClass.includes('rung') || lcClass.includes('ladder') || lcClass.includes('step') ||
+          lcClass.includes('board') || lcClass.includes('card') || lcClass.includes('tile') ||
+          el.getAttribute('role') === 'listitem' || el.getAttribute('role') === 'row' ||
+          el.draggable || el.getAttribute('draggable') === 'true';
+
+        if (isGameRelated && report.gameElements.length < 30) {
+          report.gameElements.push({
+            tag: el.tagName.toLowerCase(),
+            className: this._truncate(className, 100),
+            text: this._truncate(text, 120),
+            childCount: el.children.length,
+            role: el.getAttribute('role'),
+            ariaLabel: el.getAttribute('aria-label'),
+            draggable: el.draggable || el.getAttribute('draggable') === 'true',
+            rect: this._getRect(el),
+            dataset: Object.keys(el.dataset).length > 0 ? { ...el.dataset } : undefined
+          });
+        }
+      }
+
+      // Also look for elements with visible text 3-7 chars that might be game words
+      // (outside overlay, not navigation)
+      if (el.children.length === 0 && text.length >= 3 && text.length <= 10) {
+        const upper = text.toUpperCase();
+        if (/^[A-Z]{3,7}$/.test(upper) && report.gameElements.length < 50) {
+          const parent = el.parentElement;
+          const parentClass = parent?.className?.toString() || '';
+          // Skip navigation elements
+          if (!parentClass.includes('nav') && !parentClass.includes('menu')) {
+            report.gameElements.push({
+              type: 'word-candidate',
+              tag: el.tagName.toLowerCase(),
+              text: text,
+              parentTag: parent?.tagName?.toLowerCase(),
+              parentClass: this._truncate(parentClass, 80),
+              rect: this._getRect(el)
+            });
+          }
+        }
+      }
+    }
 
     console.log('[CrossclimbSolver] Deep Scan Report:', report);
     return report;

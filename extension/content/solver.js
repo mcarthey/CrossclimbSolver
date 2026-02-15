@@ -133,7 +133,11 @@ const Solver = {
 
   // ----- DOM DISCOVERY -----
 
-  async _discoverDOM() {
+  async _discoverDOM(puzzleDataOverride = null) {
+    // Allow passing puzzleData directly (needed when called before solve())
+    const pd = puzzleDataOverride || this.state.puzzleData;
+    const wordLadder = pd?.wordLadder;
+
     const info = {
       container: null,
       rows: [],
@@ -158,8 +162,8 @@ const Solver = {
     }
 
     // Check for word-rows in current frame (drag-to-reorder mode)
-    if (this.state.puzzleData?.wordLadder?.length >= 7) {
-      const wordRows = this._findWordRows(document, document.body, this.state.puzzleData.wordLadder);
+    if (wordLadder?.length >= 7) {
+      const wordRows = this._findWordRows(document, document.body, wordLadder);
       if (wordRows.length >= 3) {
         console.log('[CrossclimbSolver] Game found in current frame (word-row mode)');
         info.doc = document;
@@ -186,9 +190,8 @@ const Solver = {
         return info;
       }
 
-      // Also check for word-rows in shadow DOM
-      if (this.state.puzzleData?.wordLadder?.length >= 7) {
-        const shadowWordRows = this._findWordRows(root, root, this.state.puzzleData.wordLadder);
+      if (wordLadder?.length >= 7) {
+        const shadowWordRows = this._findWordRows(root, root, wordLadder);
         if (shadowWordRows.length >= 3) {
           console.log('[CrossclimbSolver] Game found in Shadow DOM (word-row mode)!');
           info.isInShadow = true;
@@ -239,8 +242,8 @@ const Solver = {
         }
 
         // Word-rows in iframe
-        if (this.state.puzzleData?.wordLadder?.length >= 7) {
-          const iframeWordRows = this._findWordRows(iframeDoc, iframeDoc.body, this.state.puzzleData.wordLadder);
+        if (wordLadder?.length >= 7) {
+          const iframeWordRows = this._findWordRows(iframeDoc, iframeDoc.body, wordLadder);
           if (iframeWordRows.length >= 3) {
             console.log('[CrossclimbSolver] Game found in iframe (word-row mode)');
             info.isInIframe = true;
@@ -292,10 +295,14 @@ const Solver = {
 
     const wordSet = new Set(wordLadder.map(w => w.toUpperCase()));
     const wordRows = [];
+    const overlayEl = document.getElementById('crossclimb-solver-overlay');
 
     // Walk all elements looking for those whose text matches an answer word
     const allEls = root.querySelectorAll('*');
     for (const el of allEls) {
+      // Skip our own overlay elements
+      if (overlayEl && (el === overlayEl || overlayEl.contains(el))) continue;
+
       const text = el.textContent.trim().toUpperCase();
       // Skip very large elements (they contain multiple words)
       if (text.length > 20) continue;
