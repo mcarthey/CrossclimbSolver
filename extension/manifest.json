@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "Crossclimb Solver",
+  "version": "1.1.0",
+  "description": "Automatically solves LinkedIn Crossclimb puzzles by fetching answers and interacting with the game UI.",
+  "permissions": [
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://crossclimbanswer.io/*",
+    "https://www.linkedin.com/games/crossclimb/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.linkedin.com/games/crossclimb*",
+        "https://www.linkedin.com/games-embed/*",
+        "https://www.linkedin.com/games/*"
+      ],
+      "js": [
+        "content/dom-helpers.js",
+        "content/answer-parser.js",
+        "content/dom-inspector.js",
+        "content/solver.js",
+        "content/overlay.js",
+        "content/main.js"
+      ],
+      "css": [
+        "content/overlay.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Crossclimb Solver"
+  },
+  "icons": {
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
