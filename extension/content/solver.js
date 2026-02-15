@@ -56,6 +56,21 @@ const Solver = {
       const domInfo = await this._discoverDOM();
       log(`Found ${domInfo.rows.length} puzzle rows`);
 
+      // Check if we found word-rows (drag-to-reorder mode)
+      if (domInfo.rows.length === 0 && domInfo.wordRows.length >= 3) {
+        log(`Found ${domInfo.wordRows.length} word-rows (drag-to-reorder mode)`);
+        for (const wr of domInfo.wordRows) {
+          log(`  "${wr.word}" draggable=${!!wr.draggableElement} rect=${Math.round(wr.rect.top)},${Math.round(wr.rect.left)}`);
+        }
+
+        // Solve via drag-to-reorder
+        status('reordering', 'Reordering word rows...');
+        await this._solveByReordering(domInfo.wordRows, puzzleData, log);
+        status('done', 'Puzzle solved!');
+        onComplete?.();
+        return;
+      }
+
       if (domInfo.rows.length === 0) {
         // Surface diagnostics in the overlay
         if (domInfo.diagnostics) {
@@ -122,22 +137,67 @@ const Solver = {
     const info = {
       container: null,
       rows: [],
+      wordRows: [],  // Word-row mode: rows containing whole words (for drag-to-reorder)
       keyboard: null,
       isInIframe: false,
+      isInShadow: false,
       doc: document,
       gameFrame: null,
+      gameRoot: null,  // Could be a shadow root
     };
 
-    // First: check if we ARE inside the game frame already
-    // (content script runs in all_frames, so we might be inside the game iframe)
+    // First: check regular DOM in current frame
     const localRows = this._findRows(document, document.body);
     if (localRows.length >= 5) {
-      console.log('[CrossclimbSolver] Game found in current frame');
+      console.log('[CrossclimbSolver] Game found in current frame (letter-cell mode)');
       info.doc = document;
       info.rows = localRows;
       info.container = this._findGameContainer(document);
       info.keyboard = this._findKeyboard(document);
       return info;
+    }
+
+    // Check for word-rows in current frame (drag-to-reorder mode)
+    if (this.state.puzzleData?.wordLadder?.length >= 7) {
+      const wordRows = this._findWordRows(document, document.body, this.state.puzzleData.wordLadder);
+      if (wordRows.length >= 3) {
+        console.log('[CrossclimbSolver] Game found in current frame (word-row mode)');
+        info.doc = document;
+        info.wordRows = wordRows;
+        info.container = this._findGameContainer(document);
+        return info;
+      }
+    }
+
+    // Walk Shadow DOM trees looking for game content
+    console.log('[CrossclimbSolver] Checking Shadow DOM...');
+    const shadowRoots = this._findAllShadowRoots(document);
+    console.log(`[CrossclimbSolver] Found ${shadowRoots.length} shadow root(s)`);
+
+    for (const { root, host } of shadowRoots) {
+      const shadowRows = this._findRows(root, root);
+      if (shadowRows.length >= 5) {
+        console.log('[CrossclimbSolver] Game found in Shadow DOM!');
+        info.isInShadow = true;
+        info.gameRoot = root;
+        info.rows = shadowRows;
+        info.container = host;
+        info.keyboard = this._findKeyboard(root);
+        return info;
+      }
+
+      // Also check for word-rows in shadow DOM
+      if (this.state.puzzleData?.wordLadder?.length >= 7) {
+        const shadowWordRows = this._findWordRows(root, root, this.state.puzzleData.wordLadder);
+        if (shadowWordRows.length >= 3) {
+          console.log('[CrossclimbSolver] Game found in Shadow DOM (word-row mode)!');
+          info.isInShadow = true;
+          info.gameRoot = root;
+          info.wordRows = shadowWordRows;
+          info.container = host;
+          return info;
+        }
+      }
     }
 
     // Check accessible iframes for the game
@@ -162,6 +222,34 @@ const Solver = {
           console.log('[CrossclimbSolver] Game found in iframe:', iframe.src);
           return info;
         }
+
+        // Check iframe shadow DOMs too
+        const iframeShadowRoots = this._findAllShadowRoots(iframeDoc);
+        for (const { root, host } of iframeShadowRoots) {
+          const sr = this._findRows(root, root);
+          if (sr.length >= 5) {
+            console.log('[CrossclimbSolver] Game found in iframe Shadow DOM!');
+            info.isInIframe = true;
+            info.isInShadow = true;
+            info.gameRoot = root;
+            info.rows = sr;
+            info.container = host;
+            return info;
+          }
+        }
+
+        // Word-rows in iframe
+        if (this.state.puzzleData?.wordLadder?.length >= 7) {
+          const iframeWordRows = this._findWordRows(iframeDoc, iframeDoc.body, this.state.puzzleData.wordLadder);
+          if (iframeWordRows.length >= 3) {
+            console.log('[CrossclimbSolver] Game found in iframe (word-row mode)');
+            info.isInIframe = true;
+            info.doc = iframeDoc;
+            info.gameFrame = iframe;
+            info.wordRows = iframeWordRows;
+            return info;
+          }
+        }
       } catch (e) {
         console.log(`[CrossclimbSolver] Cannot access iframe (cross-origin): ${iframe.src?.substring(0, 60) || '(no src)'}`);
       }
@@ -173,12 +261,75 @@ const Solver = {
     info.keyboard = this._findKeyboard(document);
 
     // If still no rows, log diagnostic info
-    if (info.rows.length === 0) {
-      console.warn('[CrossclimbSolver] No puzzle rows found in any frame!');
+    if (info.rows.length === 0 && info.wordRows.length === 0) {
+      console.warn('[CrossclimbSolver] No puzzle rows found in any frame or shadow root!');
       info.diagnostics = this._logDiagnostics(document);
     }
 
     return info;
+  },
+
+  // Find all shadow roots in a document, recursively
+  _findAllShadowRoots(doc) {
+    const results = [];
+    const walk = (root) => {
+      const els = root.querySelectorAll('*');
+      for (const el of els) {
+        if (el.shadowRoot) {
+          results.push({ root: el.shadowRoot, host: el });
+          walk(el.shadowRoot);
+        }
+      }
+    };
+    walk(doc);
+    return results;
+  },
+
+  // Find elements containing whole words from our answer ladder
+  // For Crossclimb's drag-to-reorder game mode
+  _findWordRows(doc, root, wordLadder) {
+    if (!root || !wordLadder || wordLadder.length < 7) return [];
+
+    const wordSet = new Set(wordLadder.map(w => w.toUpperCase()));
+    const wordRows = [];
+
+    // Walk all elements looking for those whose text matches an answer word
+    const allEls = root.querySelectorAll('*');
+    for (const el of allEls) {
+      const text = el.textContent.trim().toUpperCase();
+      // Skip very large elements (they contain multiple words)
+      if (text.length > 20) continue;
+
+      // Check if this element's text matches an answer word
+      // Account for spaced-out letters like "H O R N S"
+      const collapsed = text.replace(/\s+/g, '');
+      if (wordSet.has(collapsed) && collapsed.length >= 3) {
+        // Find the draggable ancestor (if any)
+        let draggableAncestor = el;
+        while (draggableAncestor && !draggableAncestor.draggable && draggableAncestor !== root) {
+          draggableAncestor = draggableAncestor.parentElement;
+        }
+
+        wordRows.push({
+          element: el,
+          word: collapsed,
+          draggableElement: draggableAncestor?.draggable ? draggableAncestor : null,
+          text: el.textContent.trim(),
+          rect: el.getBoundingClientRect(),
+          isLeaf: el.children.length === 0,
+          parentTag: el.parentElement?.tagName,
+          parentClass: (el.parentElement?.className?.toString() || '').substring(0, 100),
+        });
+      }
+    }
+
+    // Deduplicate: prefer innermost exact matches
+    const seen = new Set();
+    return wordRows.filter(wr => {
+      if (seen.has(wr.word)) return false;
+      seen.add(wr.word);
+      return true;
+    });
   },
 
   // Log diagnostics when we can't find the game
@@ -799,6 +950,95 @@ const Solver = {
     }
 
     return moves;
+  },
+
+  // ----- WORD-ROW REORDERING (drag-to-reorder mode) -----
+
+  async _solveByReordering(wordRows, puzzleData, log) {
+    const correctOrder = puzzleData.wordLadder;
+    if (!correctOrder || correctOrder.length < 7) {
+      throw new Error('No valid word ladder to use for reordering');
+    }
+
+    // Get current visual order (sorted by Y position)
+    const currentRows = wordRows
+      .map(wr => ({
+        ...wr,
+        rect: wr.element.getBoundingClientRect(),
+        y: wr.element.getBoundingClientRect().top
+      }))
+      .sort((a, b) => a.y - b.y);
+
+    const currentOrder = currentRows.map(r => r.word);
+    log(`Current order: ${currentOrder.join(' → ')}`);
+    log(`Target order:  ${correctOrder.join(' → ')}`);
+
+    // Find which words need to move
+    // Only middle 5 words are movable (top and bottom are fixed)
+    const fixedTop = correctOrder[0];
+    const fixedBottom = correctOrder[6];
+
+    // Check if top and bottom are already correct
+    if (currentOrder[0] === fixedTop && currentOrder[currentOrder.length - 1] === fixedBottom) {
+      log('Top and bottom rows are correctly placed');
+    }
+
+    // Calculate moves needed
+    const moves = this._calculateMoves(currentOrder, correctOrder);
+    log(`Need ${moves.length} move(s) to reorder`);
+
+    for (let i = 0; i < moves.length; i++) {
+      const move = moves[i];
+      log(`Move ${i + 1}: "${move.word}" from position ${move.from} to ${move.to}`);
+
+      // Re-read positions after each move (they may have changed)
+      const freshRows = wordRows
+        .map(wr => ({
+          ...wr,
+          rect: wr.element.getBoundingClientRect(),
+          y: wr.element.getBoundingClientRect().top
+        }))
+        .sort((a, b) => a.y - b.y);
+
+      const sourceRow = freshRows.find(r => r.word === move.word);
+      const targetRow = freshRows[move.to];
+
+      if (!sourceRow || !targetRow) {
+        log(`Could not find source or target for move ${i + 1}`);
+        continue;
+      }
+
+      // Use the draggable ancestor if available, otherwise the word element itself
+      const sourceEl = sourceRow.draggableElement || sourceRow.element;
+      const targetEl = targetRow.draggableElement || targetRow.element;
+
+      // Try multiple drag strategies
+      const strategies = [
+        { name: 'pointer', fn: () => CrossclimbDOM.pointerDrag(sourceEl, targetEl) },
+        { name: 'html5', fn: () => CrossclimbDOM.html5DragDrop(sourceEl, targetEl) },
+        { name: 'touch', fn: () => CrossclimbDOM.touchDrag(sourceEl, targetEl) },
+      ];
+
+      let success = false;
+      for (const strategy of strategies) {
+        try {
+          await strategy.fn();
+          log(`  Drag via ${strategy.name} succeeded`);
+          success = true;
+          break;
+        } catch (e) {
+          log(`  Drag via ${strategy.name} failed: ${e.message}`);
+        }
+      }
+
+      if (!success) {
+        log(`  WARNING: All drag strategies failed for "${move.word}"`);
+      }
+
+      await CrossclimbDOM.sleep(500); // Wait for animation
+    }
+
+    log('Reordering complete');
   },
 
   // ----- TOP/BOTTOM HANDLING -----

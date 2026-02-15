@@ -6,7 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
 
   // State
   let puzzleData = null;
@@ -128,10 +128,10 @@
 
     Overlay.log('Starting solver...');
 
-    // First try solving locally (main frame + accessible iframes)
+    // First try solving locally (main frame + accessible iframes + shadow DOM)
     const domInfo = await Solver._discoverDOM();
 
-    if (domInfo.rows.length >= 3) {
+    if (domInfo.rows.length >= 3 || domInfo.wordRows.length >= 3) {
       // Found rows locally — solve directly
       await Solver.solve(puzzleData, {
         onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
@@ -272,10 +272,48 @@
       }
     }
 
+    // Deep scan: Shadow DOM, canvas, answer words, custom elements
+    Overlay.log('--- Deep scan ---');
+    const answerWords = puzzleData?.wordLadder || [];
+    const deepReport = DOMInspector.deepScan(answerWords);
+
+    Overlay.log(`Total elements: ${deepReport.totalElements} (regular) + ${deepReport.shadowDOMElements} (shadow DOM)`);
+    Overlay.log(`Shadow roots: ${deepReport.shadowRoots.length}`);
+    for (const sr of deepReport.shadowRoots) {
+      Overlay.log(`  <${sr.tag}> id="${sr.id}" shadow elements=${sr.shadowElementCount} text="${sr.shadowTextPreview.substring(0, 80)}"`);
+    }
+
+    Overlay.log(`Canvas elements: ${deepReport.canvasElements.length}`);
+    for (const c of deepReport.canvasElements) {
+      Overlay.log(`  <canvas> ${c.dimensions} css=${c.cssSize}`);
+    }
+
+    Overlay.log(`Custom elements: ${deepReport.customElements.length}`);
+    for (const ce of deepReport.customElements.slice(0, 10)) {
+      Overlay.log(`  <${ce.tag}> children=${ce.childCount} shadow=${ce.hasShadowRoot} text="${ce.textPreview.substring(0, 50)}"`);
+    }
+
+    if (answerWords.length > 0) {
+      Overlay.log(`Answer word matches: ${deepReport.answerWordMatches.length}`);
+      for (const m of deepReport.answerWordMatches.slice(0, 15)) {
+        Overlay.log(`  "${m.word}" in <${m.tag}> exact=${m.exactMatch} draggable=${m.draggable} text="${m.fullText.substring(0, 50)}" path=${m.path.substring(0, 60)}`);
+      }
+    }
+
+    Overlay.log(`Draggable details (${deepReport.draggableDetails.length}):`);
+    for (const d of deepReport.draggableDetails.slice(0, 10)) {
+      Overlay.log(`  <${d.tag}> "${d.text.substring(0, 60)}" children=${d.childCount} aria="${d.ariaLabel || ''}" ${JSON.stringify(d.dataset).substring(0, 60)}`);
+    }
+
+    Overlay.log(`Button details (${deepReport.buttonDetails.length}):`);
+    for (const b of deepReport.buttonDetails.slice(0, 15)) {
+      Overlay.log(`  "${b.text.substring(0, 40)}" disabled=${b.disabled} aria="${b.ariaLabel || ''}"`);
+    }
+
     Overlay.setStatus('idle', 'Inspection complete. Check browser console for full report.');
     Overlay.log('Full report logged to browser console (F12 → Console)');
 
-    exposeToPageConsole('__crossclimbInspection', report);
+    exposeToPageConsole('__crossclimbInspection', { ...report, deep: deepReport });
     console.log(`${LOG_PREFIX} Inspection report available as window.__crossclimbInspection`);
   }
 
