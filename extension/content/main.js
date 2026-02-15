@@ -6,7 +6,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
 
   // State
   let puzzleData = null;
@@ -128,65 +128,21 @@
 
     Overlay.log('Starting solver...');
 
-    // First try solving locally (main frame + accessible iframes + shadow DOM)
-    // Pass puzzleData so word-row detection can search for answer words
-    const domInfo = await Solver._discoverDOM(puzzleData);
-
-    if (domInfo.rows.length >= 3 || domInfo.wordRows.length >= 3) {
-      // Found rows locally — solve directly
-      await Solver.solve(puzzleData, {
-        onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
-        onLog: (msg) => Overlay.log(msg),
-        onError: (error) => {
-          Overlay.log(`Error: ${error.message}`);
-          console.error(`${LOG_PREFIX} Solver error:`, error);
-        },
-        onComplete: () => {
-          Overlay.log('Puzzle solved successfully!');
-        }
-      });
-    } else {
-      // No rows found locally — try asking iframe instances
-      Overlay.log('No rows in main frame. Asking iframe instances...');
-
-      try {
-        const response = await sendMessageToAllFrames({
-          type: 'SOLVE_IN_FRAME',
-          puzzleData: puzzleData
-        });
-
-        if (response && response.success) {
-          Overlay.log('Solve completed via iframe!');
-          Overlay.setStatus('done', 'Puzzle solved!');
-        } else {
-          Overlay.log('Iframe solve failed or no game iframe found.');
-          // Fall through to show diagnostics
-          await Solver.solve(puzzleData, {
-            onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
-            onLog: (msg) => Overlay.log(msg),
-            onError: (error) => {
-              Overlay.log(`Error: ${error.message}`);
-            },
-            onComplete: () => {
-              Overlay.log('Puzzle solved successfully!');
-            }
-          });
-        }
-      } catch (e) {
-        Overlay.log(`Iframe communication failed: ${e.message}`);
-        // Fall through to regular solve which will show diagnostics
-        await Solver.solve(puzzleData, {
-          onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
-          onLog: (msg) => Overlay.log(msg),
-          onError: (error) => {
-            Overlay.log(`Error: ${error.message}`);
-          },
-          onComplete: () => {
-            Overlay.log('Puzzle solved successfully!');
-          }
-        });
+    const solverCallbacks = {
+      onStatus: (phase, msg) => Overlay.setStatus(phase, msg),
+      onLog: (msg) => Overlay.log(msg),
+      onError: (error) => {
+        Overlay.log(`Error: ${error.message}`);
+        console.error(`${LOG_PREFIX} Solver error:`, error);
+      },
+      onComplete: () => {
+        Overlay.log('Puzzle solved successfully!');
       }
-    }
+    };
+
+    // v1.5: Solver.solve() now uses crossclimb__* selectors directly,
+    // with legacy fallback built in
+    await Solver.solve(puzzleData, solverCallbacks);
   }
 
   // ----- INSPECT HANDLER -----
@@ -250,25 +206,37 @@
       Overlay.log(`Iframe query failed: ${e.message}`);
     }
 
-    // Run solver's diagnostic function
-    Overlay.log('--- Solver diagnostics ---');
-    const domInfo = await Solver._discoverDOM(puzzleData);
-    Overlay.log(`Solver found ${domInfo.rows.length} puzzle rows (isInIframe=${domInfo.isInIframe})`);
-    for (const row of domInfo.rows) {
-      Overlay.log(`  Row: "${row.currentLetters}" locked=${row.isLocked} text="${row.text.substring(0, 60)}"`);
+    // v1.5: Check new crossclimb board detection
+    Overlay.log('--- Board detection (v1.5) ---');
+    const board = Solver._findGameBoard();
+    if (board) {
+      Overlay.log(`Game board FOUND: ${board.middleRows.length} middle rows, ${board.lockedRows.length} locked rows`);
+      for (let i = 0; i < board.middleRows.length; i++) {
+        const row = board.middleRows[i];
+        const boxes = row.querySelectorAll('.crossclimb__guess_box');
+        const cls = (row.className || '').substring(0, 80);
+        Overlay.log(`  Middle row ${i + 1}: ${boxes.length} boxes, class="${cls}"`);
+      }
+      for (let i = 0; i < board.lockedRows.length; i++) {
+        const row = board.lockedRows[i];
+        const text = row.textContent.trim().substring(0, 60);
+        Overlay.log(`  Locked row ${i + 1}: text="${text}"`);
+      }
+      const clue = Solver._readActiveClue(board.gridContainer);
+      Overlay.log(`  Active clue: "${clue || '(none)'}"`);
+    } else {
+      Overlay.log('Game board NOT found via crossclimb__* selectors');
     }
-    Overlay.log(`Keyboard: ${domInfo.keyboard ? 'found' : 'not found'}`);
+
+    // Legacy solver diagnostics
+    Overlay.log('--- Legacy solver diagnostics ---');
+    const domInfo = await Solver._legacyDiscoverDOM(puzzleData);
+    Overlay.log(`Legacy found ${domInfo.rows.length} puzzle rows (isInIframe=${domInfo.isInIframe})`);
 
     // Show diagnostics if no rows found
     if (domInfo.diagnostics) {
       Overlay.log(`  Single-letter elements: ${domInfo.diagnostics.singleLetterCount}`);
-      for (const p of domInfo.diagnostics.parentSamples) {
-        Overlay.log(`  Parent: <${p.tag}> letters="${p.letters}" txtLen=${p.textLength}`);
-      }
-      for (const d of domInfo.diagnostics.draggables.slice(0, 5)) {
-        Overlay.log(`  Draggable: "${d.text}" letters="${d.childLetters}"`);
-      }
-      for (const f of domInfo.diagnostics.iframes) {
+      for (const f of (domInfo.diagnostics.iframes || [])) {
         Overlay.log(`  iframe: ${f.src} accessible=${f.accessible}`);
       }
     }
