@@ -81,7 +81,30 @@ const Solver = {
       log(`Have ${middleAnswers.length} middle answers: ${middleAnswers.join(', ')}`);
       log(`Have ${clueAnswerMap.size} clue-answer pairs`);
 
-      // Step 3: Fill in each middle row
+      // Step 3: Run diagnostics on the first row to understand input mechanism
+      status('solving', 'Analyzing input mechanism...');
+      const diagSel = '[data-cs-row="0"] .crossclimb__guess_box';
+      const diag = await CrossclimbDOM._bridgeCmd('diagnose', { selector: diagSel }, 3000);
+      if (diag.ok && diag.data) {
+        const d = diag.data;
+        log(`Diagnostics: activeElement=${d.activeElement?.tag}.${d.activeElement?.class?.substring(0, 30)}`);
+        if (d.afterClick) log(`  After click: ${d.afterClick.tag}.${d.afterClick.class?.substring(0, 40)} editable=${d.afterClick.contentEditable}`);
+        log(`  Game inputs: ${d.gameInputCount}`);
+        for (const gi of (d.gameInputs || [])) {
+          log(`    <${gi.tag}> type=${gi.type} class="${gi.class}" rect=${gi.rect} val="${gi.value}"`);
+        }
+        log(`  Box children: ${d.boxChildren?.length || 0}`);
+        for (const bc of (d.boxChildren || [])) {
+          log(`    <${bc.tag}> class="${bc.class}" text="${bc.text}" rect=${bc.rect} editable=${bc.contentEditable}`);
+        }
+        log(`  Hidden inputs: ${d.hiddenInputs?.length || 0}`);
+        for (const hi of (d.hiddenInputs || [])) {
+          log(`    <${hi.tag}> type=${hi.type} class="${hi.class}" rect=${hi.rect} parent="${hi.parentClass}"`);
+        }
+        log(`  Contenteditable elements: ${d.editableCount || 0}`);
+      }
+
+      // Step 4: Fill in each middle row
       status('solving', 'Filling in answers...');
       const filledAnswers = []; // track what we put where
 
@@ -328,7 +351,14 @@ const Solver = {
 
     // Type the whole word via the page-context bridge
     const result = await CrossclimbDOM.pageTypeWord(answer);
-    if (log) log(`  Type word: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
+    if (log) {
+      log(`  Type word: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
+      // Log details from first key to understand what strategies were tried
+      if (result.keyDetails && result.keyDetails[0]) {
+        const kd = result.keyDetails[0];
+        log(`  First key: active=${kd.activeTag}.${kd.activeClass} strategies=[${kd.strategies?.join(', ')}]`);
+      }
+    }
 
     if (!result.ok) {
       // Fallback: try key-by-key from page context
