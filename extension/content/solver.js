@@ -111,42 +111,115 @@ const Solver = {
       keyboard: null,
       isInIframe: false,
       doc: document,
+      gameFrame: null,
     };
 
-    // Check if the game is in an iframe
+    // First: check if we ARE inside the game frame already
+    // (content script runs in all_frames, so we might be inside the game iframe)
+    const localRows = this._findRows(document, document.body);
+    if (localRows.length >= 5) {
+      console.log('[CrossclimbSolver] Game found in current frame');
+      info.doc = document;
+      info.rows = localRows;
+      info.container = this._findGameContainer(document);
+      info.keyboard = this._findKeyboard(document);
+      return info;
+    }
+
+    // Check accessible iframes for the game
     const iframes = document.querySelectorAll('iframe');
+    console.log(`[CrossclimbSolver] Checking ${iframes.length} iframes for game content...`);
+
     for (const iframe of iframes) {
       try {
         const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
-        if (iframeDoc) {
-          // Check if this iframe contains the game
-          const gameIndicators = iframeDoc.querySelectorAll(
-            '[class*="crossclimb"], [class*="game"], [class*="puzzle"], [class*="ladder"], [class*="board"]'
-          );
-          if (gameIndicators.length > 0) {
-            info.isInIframe = true;
-            info.doc = iframeDoc;
-            console.log('[CrossclimbSolver] Game found in iframe:', iframe.src);
-            break;
-          }
+        if (!iframeDoc || !iframeDoc.body) continue;
+
+        const iframeRows = this._findRows(iframeDoc, iframeDoc.body);
+        console.log(`[CrossclimbSolver] iframe "${iframe.src?.substring(0, 60) || '(no src)'}" → ${iframeRows.length} rows found`);
+
+        if (iframeRows.length >= 5) {
+          info.isInIframe = true;
+          info.doc = iframeDoc;
+          info.gameFrame = iframe;
+          info.rows = iframeRows;
+          info.container = this._findGameContainer(iframeDoc);
+          info.keyboard = this._findKeyboard(iframeDoc);
+          console.log('[CrossclimbSolver] Game found in iframe:', iframe.src);
+          return info;
         }
-      } catch {
-        // Cross-origin iframe, skip
+      } catch (e) {
+        console.log(`[CrossclimbSolver] Cannot access iframe (cross-origin): ${iframe.src?.substring(0, 60) || '(no src)'}`);
       }
     }
 
-    const doc = info.doc;
+    // Fallback: use whatever we found in the main document
+    info.rows = localRows;
+    info.container = this._findGameContainer(document);
+    info.keyboard = this._findKeyboard(document);
 
-    // Find the game container
-    info.container = this._findGameContainer(doc);
-
-    // Find puzzle rows
-    info.rows = this._findRows(doc, info.container);
-
-    // Find keyboard
-    info.keyboard = this._findKeyboard(doc);
+    // If still no rows, log diagnostic info
+    if (info.rows.length === 0) {
+      console.warn('[CrossclimbSolver] No puzzle rows found in any frame!');
+      this._logDiagnostics(document);
+    }
 
     return info;
+  },
+
+  // Log diagnostics when we can't find the game
+  _logDiagnostics(doc) {
+    console.log('[CrossclimbSolver] === DIAGNOSTICS ===');
+
+    // Count elements with single-letter text content at various depths
+    const singleLetterEls = doc.querySelectorAll('*');
+    let singleLetterCount = 0;
+    const sampleParents = new Set();
+    for (const el of singleLetterEls) {
+      if (el.children.length === 0 && /^[A-Z]$/i.test(el.textContent.trim())) {
+        singleLetterCount++;
+        if (sampleParents.size < 10 && el.parentElement) {
+          sampleParents.add(el.parentElement);
+        }
+      }
+    }
+    console.log(`[CrossclimbSolver] Found ${singleLetterCount} single-letter leaf elements`);
+
+    // Show sample parents of single-letter elements
+    for (const parent of sampleParents) {
+      const letters = [...parent.children]
+        .filter(c => c.children.length === 0 && /^[A-Z]$/i.test(c.textContent.trim()))
+        .map(c => c.textContent.trim());
+      console.log(`[CrossclimbSolver]   Parent: <${parent.tagName}> class="${(parent.className?.toString() || '').substring(0, 80)}" children-letters: ${letters.join('')} (${letters.length} letters)`);
+
+      // Also check grandparent
+      const gp = parent.parentElement;
+      if (gp) {
+        console.log(`[CrossclimbSolver]     Grandparent: <${gp.tagName}> class="${(gp.className?.toString() || '').substring(0, 80)}" children: ${gp.children.length}`);
+      }
+    }
+
+    // Check draggable elements
+    const draggables = doc.querySelectorAll('[draggable="true"]');
+    console.log(`[CrossclimbSolver] Draggable elements: ${draggables.length}`);
+    for (const d of [...draggables].slice(0, 5)) {
+      console.log(`[CrossclimbSolver]   <${d.tagName}> class="${(d.className?.toString() || '').substring(0, 80)}" text="${d.textContent.trim().substring(0, 60)}"`);
+    }
+
+    // List all iframes with access status
+    const iframes = doc.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      let accessible = false;
+      let bodyChildCount = 0;
+      try {
+        const idoc = iframe.contentDocument || iframe.contentWindow?.document;
+        accessible = !!idoc;
+        bodyChildCount = idoc?.body?.children?.length || 0;
+      } catch { /* cross-origin */ }
+      console.log(`[CrossclimbSolver]   iframe src="${(iframe.src || '').substring(0, 80)}" accessible=${accessible} bodyChildren=${bodyChildCount}`);
+    }
+
+    console.log('[CrossclimbSolver] === END DIAGNOSTICS ===');
   },
 
   _findGameContainer(doc) {
@@ -175,42 +248,93 @@ const Solver = {
 
   _findRows(doc, container) {
     const root = container || doc.body;
-    const rows = [];
+    if (!root) return [];
 
-    // Strategy 1: Find row containers with letter cells inside
-    const allChildren = root.querySelectorAll('*');
-    for (const el of allChildren) {
-      // Skip very deep or very shallow elements
+    const rows = [];
+    const allElements = root.querySelectorAll('*');
+
+    for (const el of allElements) {
       const text = el.textContent.trim();
       if (text.length > 500 || text.length === 0) continue;
 
-      // Check if this element looks like a puzzle row
       const children = el.children;
       if (children.length < 2) continue;
 
-      // Count single-letter elements among children (or grandchildren)
-      const letterEls = el.querySelectorAll('[class*="cell"], [class*="Cell"], [class*="tile"], [class*="Tile"], [class*="letter"], [class*="Letter"]');
+      // --- Strategy 1: class-name based cell lookup ---
+      const letterEls = el.querySelectorAll(
+        '[class*="cell"], [class*="Cell"], [class*="tile"], [class*="Tile"], ' +
+        '[class*="letter"], [class*="Letter"], [class*="char"], [class*="Char"], ' +
+        '[class*="square"], [class*="Square"]'
+      );
       if (letterEls.length >= 3 && letterEls.length <= 8) {
-        rows.push({
-          element: el,
-          letterElements: [...letterEls],
-          text: text,
-          isLocked: this._isRowLocked(el),
-          currentLetters: [...letterEls].map(le => le.textContent.trim()).join('')
-        });
+        rows.push(this._makeRow(el, [...letterEls]));
         continue;
       }
 
-      // Alternative: look for children that are single characters
-      const charChildren = [...children].filter(c => /^[A-Z]$/i.test(c.textContent.trim()));
+      // --- Strategy 2: direct children are single uppercase letters ---
+      const charChildren = [...children].filter(c =>
+        /^[A-Z]$/i.test(c.textContent.trim()) && c.children.length === 0
+      );
       if (charChildren.length >= 3) {
-        rows.push({
-          element: el,
-          letterElements: charChildren,
-          text: text,
-          isLocked: this._isRowLocked(el),
-          currentLetters: charChildren.map(c => c.textContent.trim()).join('')
-        });
+        rows.push(this._makeRow(el, charChildren));
+        continue;
+      }
+
+      // --- Strategy 3: grandchildren are single letters ---
+      // e.g. <row><wrapper><span>M</span><span>E</span>...</wrapper></row>
+      for (const child of children) {
+        const grandcharChildren = [...child.children].filter(gc =>
+          /^[A-Z]$/i.test(gc.textContent.trim()) && gc.children.length === 0
+        );
+        if (grandcharChildren.length >= 3) {
+          rows.push(this._makeRow(el, grandcharChildren));
+          break; // Don't double-count this row
+        }
+      }
+
+      // --- Strategy 4: leaf descendants are single letters (any depth) ---
+      // Find all leaf text nodes that are single uppercase letters
+      if (!rows.find(r => r.element === el)) {
+        const leafLetters = [];
+        const walk = (node) => {
+          if (node.children.length === 0) {
+            const t = node.textContent.trim();
+            if (/^[A-Z]$/i.test(t)) leafLetters.push(node);
+          } else {
+            for (const c of node.children) walk(c);
+          }
+        };
+        walk(el);
+
+        // Only count if we have 3-8 leaf letter elements AND the element isn't too big
+        // (to avoid matching the entire page body)
+        if (leafLetters.length >= 3 && leafLetters.length <= 8 && text.length < 200) {
+          rows.push(this._makeRow(el, leafLetters));
+        }
+      }
+    }
+
+    // Also try: find draggable elements that contain letter sequences
+    const draggables = root.querySelectorAll('[draggable="true"]');
+    for (const el of draggables) {
+      if (rows.find(r => r.element === el || r.element.contains(el) || el.contains(r.element))) continue;
+
+      const text = el.textContent.trim();
+      if (text.length > 200 || text.length === 0) continue;
+
+      const leafLetters = [];
+      const walk = (node) => {
+        if (node.children.length === 0) {
+          const t = node.textContent.trim();
+          if (/^[A-Z]$/i.test(t)) leafLetters.push(node);
+        } else {
+          for (const c of node.children) walk(c);
+        }
+      };
+      walk(el);
+
+      if (leafLetters.length >= 3 && leafLetters.length <= 8) {
+        rows.push(this._makeRow(el, leafLetters));
       }
     }
 
@@ -218,14 +342,39 @@ const Solver = {
     return this._deduplicateRows(rows);
   },
 
+  _makeRow(element, letterElements) {
+    return {
+      element,
+      letterElements,
+      text: element.textContent.trim(),
+      isLocked: this._isRowLocked(element),
+      currentLetters: letterElements.map(le => le.textContent.trim()).join(''),
+      draggable: element.draggable || element.getAttribute('draggable') === 'true',
+      dragHandle: element.querySelector('[class*="drag"], [class*="Drag"], [class*="grip"], [class*="Grip"], [class*="handle"], [class*="Handle"]')
+    };
+  },
+
   _isRowLocked(element) {
-    // Check for lock indicators
-    const hasLockClass = element.className?.toString().toLowerCase().includes('lock');
-    const hasLockChild = element.querySelector('[class*="lock"], [class*="Lock"], [aria-label*="lock"]');
-    const hasLockText = element.textContent.includes('🔒');
+    const className = element.className?.toString().toLowerCase() || '';
+    const hasLockClass = className.includes('lock');
+
+    const hasLockChild = element.querySelector(
+      '[class*="lock"], [class*="Lock"], [aria-label*="lock"], [aria-label*="Lock"]'
+    );
+
+    // Check for lock emoji or icon
+    const hasLockText = element.textContent.includes('🔒') || element.textContent.includes('🔐');
+
+    // Check aria attributes
     const isDisabled = element.getAttribute('aria-disabled') === 'true';
 
-    return hasLockClass || !!hasLockChild || hasLockText || isDisabled;
+    // Check for SVG lock icons
+    const hasSvgLock = element.querySelector('svg[class*="lock"], svg[aria-label*="lock"]');
+
+    // Check if the element or a parent has a "locked" state class
+    const hasLockedState = className.includes('locked') || className.includes('disabled');
+
+    return hasLockClass || !!hasLockChild || hasLockText || isDisabled || !!hasSvgLock || hasLockedState;
   },
 
   _deduplicateRows(rows) {

@@ -17,7 +17,14 @@
     if (isInitialized) return;
     isInitialized = true;
 
-    console.log(`${LOG_PREFIX} Initializing on ${window.location.href}`);
+    const isTopFrame = (window === window.top);
+    console.log(`${LOG_PREFIX} Initializing on ${window.location.href} (${isTopFrame ? 'top frame' : 'iframe'})`);
+
+    // Only create the overlay on the top-level frame
+    if (!isTopFrame) {
+      console.log(`${LOG_PREFIX} Skipping overlay in iframe`);
+      return;
+    }
 
     // Create and show the overlay
     Overlay.create();
@@ -117,9 +124,10 @@
     Overlay.log('Running DOM inspection...');
     Overlay.setStatus('inspecting', 'Inspecting DOM structure...');
 
+    // Inspect the main page
+    Overlay.log('--- Main page ---');
     const report = DOMInspector.inspect();
 
-    // Log summary to overlay
     Overlay.log(`Found ${report.iframes.length} iframe(s)`);
     Overlay.log(`Found ${report.gameContainer.length} game container candidate(s)`);
     Overlay.log(`Found ${report.rows.length} potential puzzle row(s)`);
@@ -128,12 +136,60 @@
     Overlay.log(`Found ${report.draggables.length} draggable element(s)`);
     Overlay.log(`Found ${report.buttons.length} game button(s)`);
 
+    // Also inspect accessible iframes
+    const iframes = document.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      try {
+        const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document;
+        if (!iframeDoc || !iframeDoc.body) continue;
+
+        const src = iframe.src?.substring(0, 60) || '(no src)';
+        Overlay.log(`--- iframe: ${src} ---`);
+
+        // Quick row scan in this iframe
+        const iframeRows = Solver._findRows(iframeDoc, iframeDoc.body);
+        Overlay.log(`  Puzzle rows: ${iframeRows.length}`);
+        for (const row of iframeRows) {
+          Overlay.log(`    Row: "${row.currentLetters}" locked=${row.isLocked} draggable=${row.draggable}`);
+        }
+
+        // Quick keyboard scan
+        const iframeKeyboard = Solver._findKeyboard(iframeDoc);
+        Overlay.log(`  Keyboard: ${iframeKeyboard ? 'found' : 'not found'}`);
+
+      } catch (e) {
+        const src = iframe.src?.substring(0, 60) || '(no src)';
+        Overlay.log(`--- iframe: ${src} (cross-origin, cannot access) ---`);
+      }
+    }
+
+    // Also run the solver's diagnostic function
+    Overlay.log('--- Solver diagnostics ---');
+    const domInfo = await Solver._discoverDOM();
+    Overlay.log(`Solver found ${domInfo.rows.length} puzzle rows (isInIframe=${domInfo.isInIframe})`);
+    for (const row of domInfo.rows) {
+      Overlay.log(`  Row: "${row.currentLetters}" locked=${row.isLocked} text="${row.text.substring(0, 60)}"`);
+    }
+    Overlay.log(`Keyboard: ${domInfo.keyboard ? 'found' : 'not found'}`);
+
     Overlay.setStatus('idle', 'Inspection complete. Check browser console for full report.');
     Overlay.log('Full report logged to browser console (F12 → Console)');
 
-    // Also make the report accessible from the console
-    window.__crossclimbInspection = report;
+    // Expose to page console via injected script (bypasses content script isolated world)
+    exposeToPageConsole('__crossclimbInspection', report);
     console.log(`${LOG_PREFIX} Inspection report available as window.__crossclimbInspection`);
+  }
+
+  // Expose a value to the page's console (bypasses content script isolated world)
+  function exposeToPageConsole(name, value) {
+    try {
+      const script = document.createElement('script');
+      script.textContent = `window.${name} = ${JSON.stringify(value)};`;
+      document.documentElement.appendChild(script);
+      script.remove();
+    } catch (e) {
+      console.warn(`${LOG_PREFIX} Could not expose ${name} to page console:`, e);
+    }
   }
 
   // ----- MESSAGING -----
