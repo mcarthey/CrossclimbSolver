@@ -349,6 +349,153 @@ const DOMInspector = {
     return roots;
   },
 
+  // Deep scan: look for Shadow DOM, canvas, answer words, custom elements
+  deepScan(answerWords = []) {
+    const report = {
+      shadowRoots: [],
+      canvasElements: [],
+      svgElements: [],
+      customElements: [],
+      answerWordMatches: [],
+      draggableDetails: [],
+      buttonDetails: [],
+      webComponents: [],
+      totalElements: 0,
+      shadowDOMElements: 0,
+    };
+
+    const answerWordsUpper = answerWords.map(w => w.toUpperCase());
+
+    // Walk entire DOM tree including shadow roots
+    const walkDOM = (root, path = 'document') => {
+      const allEls = root.querySelectorAll('*');
+      report.totalElements += allEls.length;
+
+      for (const el of allEls) {
+        // Check for shadow root
+        if (el.shadowRoot) {
+          const childCount = el.shadowRoot.childNodes.length;
+          const elCount = el.shadowRoot.querySelectorAll('*').length;
+          report.shadowRoots.push({
+            tag: el.tagName.toLowerCase(),
+            className: this._truncate(el.className?.toString(), 100),
+            id: el.id,
+            path,
+            shadowChildNodes: childCount,
+            shadowElementCount: elCount,
+            shadowTextPreview: this._truncate(el.shadowRoot.textContent, 200)
+          });
+          report.shadowDOMElements += elCount;
+          // Recurse into shadow root
+          walkDOM(el.shadowRoot, `${path} > ${el.tagName.toLowerCase()}#${el.id || '?'}.shadowRoot`);
+        }
+
+        // Check for custom elements (hyphenated tag names)
+        if (el.tagName.includes('-')) {
+          if (report.customElements.length < 30) {
+            report.customElements.push({
+              tag: el.tagName.toLowerCase(),
+              className: this._truncate(el.className?.toString(), 80),
+              childCount: el.children.length,
+              textPreview: this._truncate(el.textContent, 80),
+              hasShadowRoot: !!el.shadowRoot,
+              path
+            });
+          }
+        }
+
+        // Check for canvas
+        if (el.tagName === 'CANVAS') {
+          report.canvasElements.push({
+            id: el.id,
+            className: this._truncate(el.className?.toString(), 80),
+            dimensions: `${el.width}x${el.height}`,
+            cssSize: `${el.offsetWidth}x${el.offsetHeight}`,
+            path
+          });
+        }
+
+        // Check for SVG with text content
+        if (el.tagName === 'svg' || el.tagName === 'SVG') {
+          const svgText = el.textContent.trim();
+          if (svgText.length > 0) {
+            report.svgElements.push({
+              id: el.id,
+              textPreview: this._truncate(svgText, 100),
+              childCount: el.children.length,
+              path
+            });
+          }
+        }
+
+        // Search for answer words in text content
+        if (answerWordsUpper.length > 0) {
+          const text = el.textContent.trim().toUpperCase();
+          for (const word of answerWordsUpper) {
+            if (text === word || (text.includes(word) && text.length < 200 && el.children.length <= 5)) {
+              if (report.answerWordMatches.length < 50) {
+                report.answerWordMatches.push({
+                  word,
+                  tag: el.tagName.toLowerCase(),
+                  className: this._truncate(el.className?.toString(), 80),
+                  exactMatch: text === word,
+                  fullText: this._truncate(el.textContent.trim(), 100),
+                  childCount: el.children.length,
+                  isLeaf: el.children.length === 0,
+                  draggable: el.draggable || el.getAttribute('draggable') === 'true',
+                  path,
+                  rect: this._getRect(el)
+                });
+              }
+            }
+          }
+        }
+      }
+    };
+
+    walkDOM(document);
+
+    // Detailed draggable scan
+    document.querySelectorAll('[draggable="true"]').forEach(el => {
+      if (report.draggableDetails.length < 20) {
+        const children = [...el.children].map(c => ({
+          tag: c.tagName,
+          text: this._truncate(c.textContent.trim(), 40),
+          className: this._truncate(c.className?.toString(), 60)
+        }));
+        report.draggableDetails.push({
+          tag: el.tagName,
+          className: this._truncate(el.className?.toString(), 100),
+          text: this._truncate(el.textContent.trim(), 100),
+          childCount: el.children.length,
+          children: children.slice(0, 5),
+          rect: this._getRect(el),
+          ariaLabel: el.getAttribute('aria-label'),
+          role: el.getAttribute('role'),
+          dataset: { ...el.dataset }
+        });
+      }
+    });
+
+    // Detailed button scan
+    document.querySelectorAll('button, [role="button"]').forEach(el => {
+      const text = el.textContent.trim();
+      if (text.length > 0 && text.length < 100 && report.buttonDetails.length < 30) {
+        report.buttonDetails.push({
+          text,
+          tag: el.tagName,
+          className: this._truncate(el.className?.toString(), 80),
+          ariaLabel: el.getAttribute('aria-label'),
+          disabled: el.disabled,
+          rect: this._getRect(el)
+        });
+      }
+    });
+
+    console.log('[CrossclimbSolver] Deep Scan Report:', report);
+    return report;
+  },
+
   // Helper utilities
   _truncate(str, maxLen) {
     if (!str) return '';
