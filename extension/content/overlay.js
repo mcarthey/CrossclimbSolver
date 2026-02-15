@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - Floating Overlay UI
 // Provides a visual control panel injected into the LinkedIn page
 

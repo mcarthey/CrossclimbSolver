@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - Main Content Script
 // Entry point that orchestrates the solving flow
 // Loaded last in the content script chain (after dom-helpers, answer-parser, dom-inspector, solver, overlay)
@@ -6,7 +9,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '1.5.6';
+  const VERSION = '2.0.0';
 
   // State
   let puzzleData = null;

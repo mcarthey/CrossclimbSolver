@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - DOM Inspector
 // Discovers and maps the LinkedIn Crossclimb puzzle DOM structure
 // Run this first to understand the page structure before solving

@@ -1,4 +1,7 @@
-// CrossclimbSolver - Core Solver Logic v1.5.0
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
+// CrossclimbSolver - Core Solver Logic
 // Targets LinkedIn Crossclimb's actual DOM structure:
 //   .crossclimb__guess          — a puzzle row
 //   .crossclimb__guess--lock    — locked row (start/end word)

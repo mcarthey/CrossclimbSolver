@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - Background Service Worker
 // Handles cross-origin fetching from crossclimbanswer.io
 // Content scripts can't fetch cross-origin, so they message us to do it.
