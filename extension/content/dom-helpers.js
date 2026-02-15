@@ -394,117 +394,37 @@ const CrossclimbDOM = {
   // the page context and communicates via window.postMessage.
 
   _bridgeReady: false,
+  _bridgeLoadPromise: null,
 
   injectBridge() {
-    if (this._bridgeReady) return;
-    this._bridgeReady = true;
+    if (this._bridgeReady) return Promise.resolve();
+    if (this._bridgeLoadPromise) return this._bridgeLoadPromise;
 
-    const script = document.createElement('script');
-    script.textContent = `(function() {
-  if (window.__csBridge) return;
-  window.__csBridge = true;
+    this._bridgeLoadPromise = new Promise((resolve) => {
+      // Load the bridge as an external file to bypass CSP restrictions on inline scripts.
+      // The file is declared in manifest.json under web_accessible_resources.
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('content/page-bridge.js');
+      script.onload = () => {
+        console.log('[CrossclimbSolver] Bridge script loaded');
+        script.remove();
+        this._bridgeReady = true;
+        resolve();
+      };
+      script.onerror = (e) => {
+        console.error('[CrossclimbSolver] Bridge script failed to load:', e);
+        this._bridgeLoadPromise = null;
+        resolve(); // resolve anyway so we don't hang
+      };
+      (document.head || document.documentElement).appendChild(script);
+    });
 
-  window.addEventListener('message', function(evt) {
-    if (evt.source !== window || !evt.data || evt.data.src !== 'cs-cmd') return;
-    var d = evt.data, result = { src: 'cs-ack', id: d.id, ok: true };
-    try {
-      if (d.action === 'type-key') {
-        var key = d.key;
-        var code = 'Key' + key.toUpperCase();
-        var kc = key.toUpperCase().charCodeAt(0);
-        var props = { key:key, code:code, keyCode:kc, which:kc, charCode:kc, bubbles:true, cancelable:true, composed:true };
-        var targets = [document.activeElement, document];
-        for (var i = 0; i < targets.length; i++) {
-          if (!targets[i]) continue;
-          targets[i].dispatchEvent(new KeyboardEvent('keydown', props));
-          targets[i].dispatchEvent(new KeyboardEvent('keypress', props));
-          targets[i].dispatchEvent(new KeyboardEvent('keyup', props));
-        }
-      }
-      else if (d.action === 'type-word') {
-        var word = d.word;
-        var idx = 0;
-        function typeNext() {
-          if (idx >= word.length) {
-            window.postMessage(result, '*');
-            return;
-          }
-          var ch = word[idx]; idx++;
-          var chCode = 'Key' + ch.toUpperCase();
-          var chKc = ch.toUpperCase().charCodeAt(0);
-          var chProps = { key:ch, code:chCode, keyCode:chKc, which:chKc, charCode:chKc, bubbles:true, cancelable:true, composed:true };
-          var tgts = [document.activeElement, document];
-          for (var j = 0; j < tgts.length; j++) {
-            if (!tgts[j]) continue;
-            tgts[j].dispatchEvent(new KeyboardEvent('keydown', chProps));
-            tgts[j].dispatchEvent(new KeyboardEvent('keypress', chProps));
-            tgts[j].dispatchEvent(new KeyboardEvent('keyup', chProps));
-          }
-          setTimeout(typeNext, 80);
-        }
-        typeNext();
-        return; // ack sent by typeNext when done
-      }
-      else if (d.action === 'click') {
-        var el = document.querySelector(d.selector);
-        if (el) {
-          el.click();
-          el.focus();
-        } else { result.ok = false; result.error = 'not found'; }
-      }
-      else if (d.action === 'focus') {
-        var fel = document.querySelector(d.selector);
-        if (fel) {
-          fel.focus();
-          fel.click();
-        }
-      }
-      else if (d.action === 'drag') {
-        var srcEl = document.querySelector(d.srcSel);
-        var tgtEl = document.querySelector(d.tgtSel);
-        if (!srcEl || !tgtEl) { result.ok = false; result.error = 'not found'; window.postMessage(result,'*'); return; }
-        var sr = srcEl.getBoundingClientRect();
-        var tr = tgtEl.getBoundingClientRect();
-        var sx = sr.left + sr.width/2, sy = sr.top + sr.height/2;
-        var ex = tr.left + tr.width/2, ey = tr.top + tr.height/2;
-        var pp = { pointerId:1, pointerType:'mouse', isPrimary:true };
-        srcEl.dispatchEvent(new PointerEvent('pointerdown', Object.assign({clientX:sx,clientY:sy,bubbles:true,cancelable:true},pp)));
-        srcEl.dispatchEvent(new MouseEvent('mousedown', {clientX:sx,clientY:sy,bubbles:true,cancelable:true}));
-        var step = 0, steps = 20;
-        function dragStep() {
-          step++;
-          if (step > steps) {
-            srcEl.dispatchEvent(new PointerEvent('pointerup', Object.assign({clientX:ex,clientY:ey,bubbles:true,cancelable:true},pp)));
-            document.dispatchEvent(new PointerEvent('pointerup', Object.assign({clientX:ex,clientY:ey,bubbles:true,cancelable:true},pp)));
-            srcEl.dispatchEvent(new MouseEvent('mouseup', {clientX:ex,clientY:ey,bubbles:true,cancelable:true}));
-            document.dispatchEvent(new MouseEvent('mouseup', {clientX:ex,clientY:ey,bubbles:true,cancelable:true}));
-            window.postMessage(result, '*');
-            return;
-          }
-          var t = step/steps;
-          var e2 = t < 0.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
-          var cx = sx+(ex-sx)*e2, cy = sy+(ey-sy)*e2;
-          srcEl.dispatchEvent(new PointerEvent('pointermove', Object.assign({clientX:cx,clientY:cy,bubbles:true,cancelable:true},pp)));
-          document.dispatchEvent(new PointerEvent('pointermove', Object.assign({clientX:cx,clientY:cy,bubbles:true,cancelable:true},pp)));
-          srcEl.dispatchEvent(new MouseEvent('mousemove', {clientX:cx,clientY:cy,bubbles:true,cancelable:true}));
-          document.dispatchEvent(new MouseEvent('mousemove', {clientX:cx,clientY:cy,bubbles:true,cancelable:true}));
-          setTimeout(dragStep, 16);
-        }
-        setTimeout(dragStep, 150);
-        return; // ack sent by dragStep
-      }
-    } catch(err) { result.ok = false; result.error = err.message; }
-    window.postMessage(result, '*');
-  });
-  console.log('[CrossclimbSolver] Page bridge ready');
-})();`;
-    document.documentElement.appendChild(script);
-    script.remove();
+    return this._bridgeLoadPromise;
   },
 
   // Send a command to the page bridge and wait for acknowledgment
-  _bridgeCmd(action, payload = {}, timeout = 5000) {
-    this.injectBridge();
+  async _bridgeCmd(action, payload = {}, timeout = 5000) {
+    await this.injectBridge();
     return new Promise((resolve) => {
       const id = Date.now() + '_' + Math.random().toString(36).slice(2);
       const handler = (event) => {
