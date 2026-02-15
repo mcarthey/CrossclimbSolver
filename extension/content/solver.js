@@ -372,85 +372,95 @@ const Solver = {
 
   async _reorderMiddleRows(board, correctMiddleOrder, filledAnswers, log) {
     // correctMiddleOrder is [word2, word3, word4, word5, word6] in correct ladder order
-    // filledAnswers tracks which answer is in which row
 
-    // Get current visual order (by Y position)
-    const getCurrentOrder = () => {
-      return filledAnswers
-        .map(f => ({
-          answer: f.answer,
-          element: f.rowElement,
-          y: f.rowElement.getBoundingClientRect().top,
-        }))
-        .sort((a, b) => a.y - b.y)
-        .map(f => f.answer);
+    // Read actual board state via bridge (reads input values in DOM child order)
+    const readOrder = async () => {
+      const result = await CrossclimbDOM.pageReadOrder();
+      if (!result.ok || !result.data?.rows) return null;
+      return result.data.rows; // [{word, csRow, y}, ...]
     };
 
-    const currentOrder = getCurrentOrder();
-    log(`Current order: ${currentOrder.join(' → ')}`);
+    let current = await readOrder();
+    if (!current || current.length === 0) {
+      log('Could not read board order');
+      return;
+    }
+
+    const currentWords = current.map(r => r.word);
+    log(`Current order: ${currentWords.join(' → ')}`);
     log(`Target order:  ${correctMiddleOrder.join(' → ')}`);
 
-    // Check if already correct
-    if (JSON.stringify(currentOrder) === JSON.stringify(correctMiddleOrder)) {
+    if (JSON.stringify(currentWords) === JSON.stringify(correctMiddleOrder)) {
       log('Rows already in correct order!');
       return;
     }
 
-    // Calculate moves needed (selection sort approach)
-    for (let targetIdx = 0; targetIdx < correctMiddleOrder.length; targetIdx++) {
-      const freshOrder = getCurrentOrder();
-      const targetWord = correctMiddleOrder[targetIdx];
-      const currentIdx = freshOrder.indexOf(targetWord);
+    // Selection sort: for each target position, drag the correct row there
+    const MAX_PASSES = correctMiddleOrder.length + 2; // safety limit
+    for (let pass = 0; pass < MAX_PASSES; pass++) {
+      current = await readOrder();
+      if (!current) break;
 
-      if (currentIdx === targetIdx) continue; // Already in place
-      if (currentIdx === -1) {
-        log(`  WARNING: "${targetWord}" not found in current rows`);
-        continue;
+      const words = current.map(r => r.word);
+
+      // Check if done
+      if (JSON.stringify(words) === JSON.stringify(correctMiddleOrder)) {
+        log('Rows in correct order!');
+        break;
       }
 
-      log(`  Moving "${targetWord}" from position ${currentIdx} to ${targetIdx}`);
+      // Find the first position that's wrong
+      let wrongIdx = -1;
+      for (let i = 0; i < correctMiddleOrder.length; i++) {
+        if (words[i] !== correctMiddleOrder[i]) {
+          wrongIdx = i;
+          break;
+        }
+      }
+      if (wrongIdx === -1) break; // all correct
 
-      // Find the source and target row elements by position
-      const sortedElements = filledAnswers
-        .map(f => ({ answer: f.answer, element: f.rowElement, y: f.rowElement.getBoundingClientRect().top }))
-        .sort((a, b) => a.y - b.y);
-
-      const sourceEntry = sortedElements.find(e => e.answer === targetWord);
-      const targetEntry = sortedElements[targetIdx];
-
-      if (!sourceEntry || !targetEntry || sourceEntry.element === targetEntry.element) continue;
-
-      // Get data-cs-row indices for CSS selectors
-      const srcIdx = sourceEntry.element.getAttribute('data-cs-row');
-      const tgtIdx = targetEntry.element.getAttribute('data-cs-row');
-
-      // Try drag via page-context bridge (dragger handle first, then row itself)
-      const strategies = [
-        { name: 'bridge-dragger', srcSel: `[data-cs-row="${srcIdx}"] .crossclimb__guess-dragger`, tgtSel: `[data-cs-row="${tgtIdx}"] .crossclimb__guess-dragger` },
-        { name: 'bridge-row', srcSel: `[data-cs-row="${srcIdx}"]`, tgtSel: `[data-cs-row="${tgtIdx}"]` },
-      ];
-
-      let success = false;
-      for (const s of strategies) {
-        const result = await CrossclimbDOM.pageDrag(s.srcSel, s.tgtSel);
-        log(`    Drag via ${s.name}: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
-        if (result.ok) { success = true; break; }
+      const targetWord = correctMiddleOrder[wrongIdx];
+      const sourceIdx = words.indexOf(targetWord);
+      if (sourceIdx === -1) {
+        log(`WARNING: "${targetWord}" not found in current rows`);
+        break;
       }
 
-      if (!success) {
-        log(`  WARNING: All drag strategies failed for "${targetWord}"`);
+      log(`Moving "${targetWord}" from position ${sourceIdx} to ${wrongIdx}`);
+
+      // Use data-cs-row attributes from the read-order result for selectors
+      const srcCsRow = current[sourceIdx].csRow;
+      const tgtCsRow = current[wrongIdx].csRow;
+
+      // Drag the source row's dragger to the target row's dragger
+      const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
+      const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
+
+      const dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
+      log(`  Drag: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
+
+      if (!dragResult.ok) {
+        // Try dragging the row itself
+        const srcSel2 = `[data-cs-row="${srcCsRow}"]`;
+        const tgtSel2 = `[data-cs-row="${tgtCsRow}"]`;
+        const dragResult2 = await CrossclimbDOM.pageDrag(srcSel2, tgtSel2);
+        log(`  Drag row fallback: ok=${dragResult2.ok}`);
       }
 
-      await CrossclimbDOM.sleep(600); // Wait for animation
+      // Wait for drag animation to complete and DOM to settle
+      await CrossclimbDOM.sleep(1200);
     }
 
-    // Verify final order
-    const finalOrder = getCurrentOrder();
-    log(`Final order: ${finalOrder.join(' → ')}`);
-    if (JSON.stringify(finalOrder) === JSON.stringify(correctMiddleOrder)) {
-      log('Reordering successful!');
-    } else {
-      log('WARNING: Final order does not match target');
+    // Final verification
+    const final = await readOrder();
+    if (final) {
+      const finalWords = final.map(r => r.word);
+      log(`Final order: ${finalWords.join(' → ')}`);
+      if (JSON.stringify(finalWords) === JSON.stringify(correctMiddleOrder)) {
+        log('Reordering successful!');
+      } else {
+        log('WARNING: Final order does not match target');
+      }
     }
   },
 
