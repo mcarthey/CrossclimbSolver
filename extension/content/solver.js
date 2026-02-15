@@ -65,8 +65,11 @@ const Solver = {
       board.middleRows.forEach((row, i) => row.setAttribute('data-cs-row', String(i)));
       board.lockedRows.forEach((row, i) => row.setAttribute('data-cs-lock', String(i)));
 
-      // Inject the page-context bridge for event dispatch
-      CrossclimbDOM.injectBridge();
+      // Inject the page-context bridge for event dispatch (file-based, bypasses CSP)
+      await CrossclimbDOM.injectBridge();
+      // Verify bridge is alive
+      const ping = await CrossclimbDOM._bridgeCmd('ping', {}, 2000);
+      log(`Bridge status: ${ping.ok ? 'connected' : 'FAILED - ' + (ping.error || 'no response')}`);
 
       // Step 2: Build clue-answer map from our puzzle data
       status('matching', 'Preparing answers...');
@@ -115,7 +118,7 @@ const Solver = {
         }
 
         log(`  Typing "${answer}" into row ${i + 1}`);
-        await this._typeIntoRow(row, answer, board);
+        await this._typeIntoRow(row, answer, board, log);
         filledAnswers.push({ answer, rowElement: row, index: i });
         await CrossclimbDOM.sleep(300);
       }
@@ -314,20 +317,22 @@ const Solver = {
 
   // ----- TYPING -----
 
-  async _typeIntoRow(rowElement, answer, board) {
+  async _typeIntoRow(rowElement, answer, board, log) {
     const idx = rowElement.getAttribute('data-cs-row');
     const boxSel = `[data-cs-row="${idx}"] .crossclimb__guess_box`;
 
-    // Make sure the first box is focused/clicked in page context
-    await CrossclimbDOM.pageClick(boxSel);
+    // Click the first box via page-context bridge
+    const clickResult = await CrossclimbDOM.pageClick(boxSel);
+    if (log) log(`  Click box: ok=${clickResult.ok}${clickResult.error ? ' err=' + clickResult.error : ''}`);
     await CrossclimbDOM.sleep(200);
 
     // Type the whole word via the page-context bridge
-    // This dispatches KeyboardEvents in the page's JS realm where Ember can see them
     const result = await CrossclimbDOM.pageTypeWord(answer);
+    if (log) log(`  Type word: ok=${result.ok}${result.error ? ' err=' + result.error : ''}`);
+
     if (!result.ok) {
-      console.warn(`[CrossclimbSolver] Bridge type-word failed: ${result.error}`);
       // Fallback: try key-by-key from page context
+      if (log) log(`  Falling back to key-by-key typing`);
       for (const char of answer) {
         await CrossclimbDOM.pageTypeKey(char);
         await CrossclimbDOM.sleep(80);
