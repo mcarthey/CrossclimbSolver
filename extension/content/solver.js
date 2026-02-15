@@ -154,6 +154,47 @@ const Solver = {
         await this._reorderMiddleRows(board, middleAnswers, filledAnswers, log);
       }
 
+      // Step 5: Fill start/end words into the locked rows (which unlock after correct ordering)
+      if (puzzleData.startWord && puzzleData.endWord) {
+        status('solving', 'Checking for endpoint rows...');
+        await CrossclimbDOM.sleep(2000); // Wait for game to process correct ordering
+
+        // Re-detect all rows in the grid to find newly unlocked endpoint rows
+        const allGuesses = board.gridContainer.querySelectorAll('.crossclimb__guess');
+        const sortedRows = [...allGuesses]
+          .map(r => ({ el: r, y: r.getBoundingClientRect().top, hasInputs: r.querySelectorAll('.crossclimb__guess_box input').length > 0 }))
+          .sort((a, b) => a.y - b.y);
+
+        const middleRowSet = new Set(board.middleRows);
+        const topRow = sortedRows[0];
+        const bottomRow = sortedRows[sortedRows.length - 1];
+
+        log(`Endpoint rows: top hasInputs=${topRow?.hasInputs} bottom hasInputs=${bottomRow?.hasInputs}`);
+
+        // Fill top row (start word) if it has inputs and isn't a middle row
+        if (topRow?.hasInputs && !middleRowSet.has(topRow.el)) {
+          topRow.el.setAttribute('data-cs-endpoint', 'top');
+          log(`Filling top row with "${puzzleData.startWord}"`);
+          const topResult = await CrossclimbDOM.pageFillRow('[data-cs-endpoint="top"]', puzzleData.startWord);
+          log(`  Top: ok=${topResult.ok} inputs=${topResult.inputCount || '?'}${topResult.error ? ' err=' + topResult.error : ''}`);
+          if (topResult.fillDetails) {
+            log(`  Letters: ${topResult.fillDetails.map(d => `${d.letter}=${d.valueAfter || '?'}`).join(' ')}`);
+          }
+          await CrossclimbDOM.sleep(500);
+        }
+
+        // Fill bottom row (end word) if it has inputs and isn't a middle row
+        if (bottomRow?.hasInputs && !middleRowSet.has(bottomRow.el)) {
+          bottomRow.el.setAttribute('data-cs-endpoint', 'bottom');
+          log(`Filling bottom row with "${puzzleData.endWord}"`);
+          const bottomResult = await CrossclimbDOM.pageFillRow('[data-cs-endpoint="bottom"]', puzzleData.endWord);
+          log(`  Bottom: ok=${bottomResult.ok} inputs=${bottomResult.inputCount || '?'}${bottomResult.error ? ' err=' + bottomResult.error : ''}`);
+          if (bottomResult.fillDetails) {
+            log(`  Letters: ${bottomResult.fillDetails.map(d => `${d.letter}=${d.valueAfter || '?'}`).join(' ')}`);
+          }
+        }
+      }
+
       status('done', 'Puzzle solved!');
       onComplete?.();
 
