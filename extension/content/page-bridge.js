@@ -1,4 +1,7 @@
-// CrossclimbSolver - Page-Context Bridge v2
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
+// CrossclimbSolver - Page-Context Bridge
 // Runs in the PAGE's JavaScript context (not the content script's isolated world).
 // Communicates via window.postMessage. Loaded as web_accessible_resource to bypass CSP.
 

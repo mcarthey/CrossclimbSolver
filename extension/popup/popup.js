@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - Extension Popup
 
 const statusDot = document.getElementById('statusDot');

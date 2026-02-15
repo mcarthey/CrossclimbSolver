@@ -1,3 +1,6 @@
+// Copyright 2025 mcarthey
+// SPDX-License-Identifier: Apache-2.0
+//
 // CrossclimbSolver - DOM Interaction Helpers
 // Low-level utilities for typing into React inputs and simulating drag-and-drop
 
