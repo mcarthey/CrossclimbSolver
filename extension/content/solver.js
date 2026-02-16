@@ -446,140 +446,147 @@ const Solver = {
       return;
     }
 
-    // ──── Phase 1: Pointer-event drag ────
-    // Dispatches synthetic PointerEvent/MouseEvent sequences on the drag handles.
-    // This is the "normal" way to simulate drag-and-drop but fails if the game
-    // checks event.isTrusted (which is always false for synthetic events).
-    log('Phase 1: Attempting pointer-event drag...');
+    // Helper: find first wrong position and build selectors
+    const findSwap = (rows) => {
+      const words = rows.map(r => r.word);
+      const wrongIdx = words.findIndex((w, i) => w !== correctMiddleOrder[i]);
+      if (wrongIdx < 0) return null;
+      const targetWord = correctMiddleOrder[wrongIdx];
+      const sourceIdx = words.indexOf(targetWord);
+      if (sourceIdx < 0) return null;
+      // Use [data-sortable-handle="true"] for the actual sortable handle element
+      const srcRow = rows[sourceIdx].csRow;
+      const tgtRow = rows[wrongIdx].csRow;
+      return {
+        word: targetWord, sourceIdx, wrongIdx, srcRow, tgtRow,
+        srcHandle: `[data-cs-row="${srcRow}"] [data-sortable-handle="true"]`,
+        tgtHandle: `[data-cs-row="${tgtRow}"] [data-sortable-handle="true"]`,
+        srcDragger: `[data-cs-row="${srcRow}"] .crossclimb__guess-dragger`,
+        tgtDragger: `[data-cs-row="${tgtRow}"] .crossclimb__guess-dragger`,
+        srcRow: `[data-cs-row="${srcRow}"]`,
+        tgtRow: `[data-cs-row="${tgtRow}"]`
+      };
+    };
+
+    // Helper: try a single drag with a given method, return true if it changed the order
+    const tryOneDrag = async (method, label, srcSel, tgtSel, beforeWords) => {
+      log(`  Moving via ${label}...`);
+      let dragResult;
+      switch (method) {
+        case 'pointer':
+          dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
+          break;
+        case 'capture-bypass':
+          dragResult = await CrossclimbDOM.pageDragCaptureBypass(srcSel, tgtSel);
+          break;
+        case 'touch':
+          dragResult = await CrossclimbDOM.pageDragTouch(srcSel, tgtSel);
+          break;
+        case 'html5':
+          dragResult = await CrossclimbDOM.pageDragHtml5(srcSel, tgtSel);
+          break;
+        default:
+          return false;
+      }
+      log(`  ${label}: ok=${dragResult.ok}${dragResult.captureAttempted ? ' captureBypass=yes' : ''}${dragResult.html5Completed ? ' html5=complete' : ''}${dragResult.error ? ' err=' + dragResult.error : ''}`);
+      await CrossclimbDOM.sleep(800);
+
+      const after = await readOrder();
+      if (isCorrect(after)) {
+        log(`  ${label} succeeded — all rows correct!`);
+        return 'complete';
+      }
+      if (after) {
+        const afterWords = after.map(r => r.word);
+        if (JSON.stringify(afterWords) === JSON.stringify(beforeWords)) {
+          log(`  ${label} had no effect`);
+          return 'no-effect';
+        }
+        log(`  ${label} partial: ${afterWords.join(' → ')}`);
+        return 'partial';
+      }
+      return 'error';
+    };
+
+    // Helper: try multiple drags with a given method until correct
+    const tryFullReorder = async (method, label) => {
+      for (let pass = 0; pass < 6; pass++) {
+        current = await readOrder();
+        if (!current || isCorrect(current)) return isCorrect(current);
+        const swap = findSwap(current);
+        if (!swap) return true; // already correct
+        const beforeWords = current.map(r => r.word);
+        log(`  [${label} pass ${pass + 1}] "${swap.word}" pos ${swap.sourceIdx}→${swap.wrongIdx}`);
+        const result = await tryOneDrag(method, label, swap.srcHandle, swap.tgtHandle, beforeWords);
+        if (result === 'complete') return true;
+        if (result === 'no-effect') return false;
+        // partial — continue
+      }
+      current = await readOrder();
+      return current && isCorrect(current);
+    };
+
     let reordered = false;
 
-    // Try just one drag to detect if the game responds to pointer events
+    // ──── Phase 1: Pointer drag with setPointerCapture bypass ────
+    // The game's sortable library calls element.setPointerCapture() during drag start.
+    // This API silently fails for synthetic events (requires isTrusted:true).
+    // We temporarily override setPointerCapture/releasePointerCapture/hasPointerCapture
+    // so our synthetic pointer events can trigger the drag operation.
+    // We also dispatch gotpointercapture/lostpointercapture events that the browser
+    // normally sends after a successful capture.
+    log('Phase 1: Pointer drag with setPointerCapture bypass...');
     {
-      const words = current.map(r => r.word);
-      let wrongIdx = words.findIndex((w, i) => w !== correctMiddleOrder[i]);
-      if (wrongIdx >= 0) {
-        const targetWord = correctMiddleOrder[wrongIdx];
-        const sourceIdx = words.indexOf(targetWord);
-        if (sourceIdx >= 0) {
-          const srcCsRow = current[sourceIdx].csRow;
-          const tgtCsRow = current[wrongIdx].csRow;
-          const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
-          const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
-
-          log(`  Moving "${targetWord}" pos ${sourceIdx}→${wrongIdx} via pointer events`);
-          const dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
-          log(`  Pointer drag: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
-          await CrossclimbDOM.sleep(800);
-
-          const afterDrag = await readOrder();
-          if (isCorrect(afterDrag)) {
-            log('  Pointer drag succeeded!');
-            reordered = true;
-          } else if (afterDrag && JSON.stringify(afterDrag.map(r => r.word)) === JSON.stringify(words)) {
-            log('  Pointer drag had no effect — game ignores synthetic pointer events');
-          } else if (afterDrag) {
-            log(`  After drag: ${afterDrag.map(r => r.word).join(' → ')}`);
-            // Drag had partial effect — continue with pointer drags
-            for (let pass = 0; pass < 5 && !reordered; pass++) {
-              current = await readOrder();
-              if (isCorrect(current)) { reordered = true; break; }
-              const w = current.map(r => r.word);
-              const wi = w.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
-              if (wi < 0) { reordered = true; break; }
-              const tw = correctMiddleOrder[wi];
-              const si = w.indexOf(tw);
-              if (si < 0) break;
-              await CrossclimbDOM.pageDrag(
-                `[data-cs-row="${current[si].csRow}"] .crossclimb__guess-dragger`,
-                `[data-cs-row="${current[wi].csRow}"] .crossclimb__guess-dragger`
-              );
-              await CrossclimbDOM.sleep(800);
+      const swap = findSwap(current);
+      if (swap) {
+        const beforeWords = current.map(r => r.word);
+        const result = await tryOneDrag('capture-bypass', 'capture-bypass', swap.srcHandle, swap.tgtHandle, beforeWords);
+        if (result === 'complete') {
+          reordered = true;
+        } else if (result === 'partial') {
+          reordered = await tryFullReorder('capture-bypass', 'capture-bypass');
+        } else if (result === 'no-effect') {
+          // Also try targeting the dragger class (in case data-sortable-handle selector fails)
+          log('  Retrying on .crossclimb__guess-dragger...');
+          current = await readOrder();
+          if (current && !isCorrect(current)) {
+            const swap2 = findSwap(current);
+            if (swap2) {
+              const bw2 = current.map(r => r.word);
+              const result2 = await tryOneDrag('capture-bypass', 'capture-bypass-dragger', swap2.srcDragger, swap2.tgtDragger, bw2);
+              if (result2 === 'complete') reordered = true;
+              else if (result2 === 'partial') reordered = await tryFullReorder('capture-bypass', 'capture-bypass-dragger');
             }
-            current = await readOrder();
-            if (isCorrect(current)) reordered = true;
           }
         }
       }
     }
 
-    // ──── Phase 2: Touch-event drag ────
-    // Touch events go through a different code path in many sortable libraries.
-    // Ember-sortable and similar addons often have dedicated touch handlers that
-    // may accept synthetic touch events even though synthetic pointer events are blocked.
+    // ──── Phase 2: HTML5 Drag and Drop ────
+    // The game has ember-drag-drop addon which uses the HTML5 DnD API
+    // (dragstart, dragenter, dragover, drop, dragend events with DataTransfer).
     if (!reordered) {
-      log('Phase 2: Attempting touch-event drag...');
+      log('Phase 2: HTML5 Drag and Drop...');
       current = await readOrder();
       if (current && !isCorrect(current)) {
-        const words = current.map(r => r.word);
-        let wrongIdx = words.findIndex((w, i) => w !== correctMiddleOrder[i]);
-        if (wrongIdx >= 0) {
-          const targetWord = correctMiddleOrder[wrongIdx];
-          const sourceIdx = words.indexOf(targetWord);
-          if (sourceIdx >= 0) {
-            const srcCsRow = current[sourceIdx].csRow;
-            const tgtCsRow = current[wrongIdx].csRow;
-            // Touch the drag handle
-            const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
-            const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
-
-            log(`  Moving "${targetWord}" pos ${sourceIdx}→${wrongIdx} via touch events`);
-            const touchResult = await CrossclimbDOM.pageDragTouch(srcSel, tgtSel);
-            log(`  Touch drag: ok=${touchResult.ok}${touchResult.error ? ' err=' + touchResult.error : ''}`);
-            await CrossclimbDOM.sleep(800);
-
-            const afterTouch = await readOrder();
-            if (isCorrect(afterTouch)) {
-              log('  Touch drag succeeded!');
-              reordered = true;
-            } else if (afterTouch && JSON.stringify(afterTouch.map(r => r.word)) === JSON.stringify(words)) {
-              log('  Touch drag had no effect — game ignores synthetic touch events too');
-            } else if (afterTouch) {
-              log(`  After touch: ${afterTouch.map(r => r.word).join(' → ')}`);
-              // Touch had partial effect — continue with touch drags
-              for (let pass = 0; pass < 5 && !reordered; pass++) {
-                current = await readOrder();
-                if (isCorrect(current)) { reordered = true; break; }
-                const w = current.map(r => r.word);
-                const wi = w.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
-                if (wi < 0) { reordered = true; break; }
-                const tw = correctMiddleOrder[wi];
-                const si = w.indexOf(tw);
-                if (si < 0) break;
-                await CrossclimbDOM.pageDragTouch(
-                  `[data-cs-row="${current[si].csRow}"] .crossclimb__guess-dragger`,
-                  `[data-cs-row="${current[wi].csRow}"] .crossclimb__guess-dragger`
-                );
-                await CrossclimbDOM.sleep(800);
-              }
-              current = await readOrder();
-              if (isCorrect(current)) reordered = true;
-            }
-
-            // Also try touching the row itself (not just the dragger handle)
-            if (!reordered) {
-              current = await readOrder();
-              if (current && !isCorrect(current)) {
-                const w2 = current.map(r => r.word);
-                const wi2 = w2.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
-                if (wi2 >= 0) {
-                  const tw2 = correctMiddleOrder[wi2];
-                  const si2 = w2.indexOf(tw2);
-                  if (si2 >= 0) {
-                    log(`  Retrying touch on row element (not dragger)...`);
-                    await CrossclimbDOM.pageDragTouch(
-                      `[data-cs-row="${current[si2].csRow}"]`,
-                      `[data-cs-row="${current[wi2].csRow}"]`
-                    );
-                    await CrossclimbDOM.sleep(800);
-                    const afterTouch2 = await readOrder();
-                    if (isCorrect(afterTouch2)) {
-                      log('  Touch on row succeeded!');
-                      reordered = true;
-                    } else if (afterTouch2) {
-                      log(`  Touch on row: ${JSON.stringify(afterTouch2.map(r => r.word)) === JSON.stringify(w2) ? 'no effect' : afterTouch2.map(r => r.word).join(' → ')}`);
-                    }
-                  }
-                }
+        const swap = findSwap(current);
+        if (swap) {
+          const beforeWords = current.map(r => r.word);
+          // Try on handle first, then on row
+          let result = await tryOneDrag('html5', 'html5-handle', swap.srcHandle, swap.tgtHandle, beforeWords);
+          if (result === 'complete') {
+            reordered = true;
+          } else if (result === 'partial') {
+            reordered = await tryFullReorder('html5', 'html5');
+          } else if (result === 'no-effect') {
+            current = await readOrder();
+            if (current && !isCorrect(current)) {
+              const swap2 = findSwap(current);
+              if (swap2) {
+                const bw2 = current.map(r => r.word);
+                const result2 = await tryOneDrag('html5', 'html5-row', swap2.srcRow, swap2.tgtRow, bw2);
+                if (result2 === 'complete') reordered = true;
+                else if (result2 === 'partial') reordered = await tryFullReorder('html5', 'html5-row');
               }
             }
           }
@@ -587,47 +594,79 @@ const Solver = {
       }
     }
 
-    // ──── Phase 3: Ember exploration + direct model reorder ────
-    // This phase inspects Ember's internal component tree to find the sortable
-    // list's backing data model and directly mutate it. This is the most reliable
-    // approach because it bypasses the DOM event layer entirely.
+    // ──── Phase 3: Ember exploration v2 + direct model reorder ────
+    // Deep inspection of Ember internals: loads AMD modules, inspects the
+    // drag-coordinator service, sortable-objects component, and Ember utilities.
     if (!reordered) {
-      log('Phase 3: Exploring Ember internals...');
+      log('Phase 3: Exploring Ember internals (v2)...');
 
-      // First, run diagnostics to understand the Ember structure
-      const exploreResult = await CrossclimbDOM.pageEmberExplore();
+      const exploreResult = await CrossclimbDOM.pageEmberExploreV2();
       if (exploreResult.ok && exploreResult.data) {
         const info = exploreResult.data;
-        log(`  Ember: version=${info.emberVersion || 'N/A'} hasRun=${info.hasRun} hasGetOwner=${info.hasGetOwner}`);
-        if (info.namespaces?.length > 0) log(`  Namespaces: ${info.namespaces.join(', ')}`);
-        if (info.applications?.length > 0) log(`  Applications: ${info.applications.map(a => a.name).join(', ')}`);
-        if (info.moduleRegistry?.available) {
-          log(`  Module registry: ${info.moduleRegistry.totalModules} modules`);
-          if (info.moduleRegistry.relevantModules?.length > 0) {
-            log(`  Relevant modules: ${info.moduleRegistry.relevantModules.join(', ')}`);
+
+        // Log crossclimb-specific modules
+        if (info.modules?.crossclimb?.length > 0) {
+          log(`  Crossclimb modules: ${info.modules.crossclimb.join(', ')}`);
+        }
+        if (info.modules?.sortable?.length > 0) {
+          log(`  Sortable modules: ${info.modules.sortable.join(', ')}`);
+        }
+        if (info.modules?.dragDrop?.length > 0) {
+          log(`  ember-drag-drop modules: ${info.modules.dragDrop.join(', ')}`);
+        }
+        if (info.modules?.playRoutes?.length > 0) {
+          log(`  Play routes: ${info.modules.playRoutes.slice(0, 10).join(', ')}`);
+        }
+
+        // Log drag-coordinator service info
+        if (info.dragCoordinator?.loaded) {
+          log(`  drag-coordinator: loaded`);
+          if (info.dragCoordinator.protoKeys?.length > 0)
+            log(`    proto: ${info.dragCoordinator.protoKeys.join(', ')}`);
+          if (info.dragCoordinator.mixinProps?.length > 0)
+            log(`    mixins: ${info.dragCoordinator.mixinProps.join(', ')}`);
+        } else if (info.dragCoordinator?.error) {
+          log(`  drag-coordinator: ${info.dragCoordinator.error}`);
+        }
+
+        // Log sortable-objects component info
+        if (info.sortableObjects?.loaded) {
+          log(`  sortable-objects: loaded`);
+          if (info.sortableObjects.protoKeys?.length > 0)
+            log(`    proto: ${info.sortableObjects.protoKeys.join(', ')}`);
+          if (info.sortableObjects.mixinProps?.length > 0)
+            log(`    mixins: ${info.sortableObjects.mixinProps.join(', ')}`);
+        } else if (info.sortableObjects?.error) {
+          log(`  sortable-objects: ${info.sortableObjects.error}`);
+        }
+
+        // Log Ember utilities availability
+        for (const [modName, modInfo] of Object.entries(info.emberUtils || {})) {
+          if (modInfo.loaded) {
+            log(`  ${modName}: loaded [${modInfo.hasFns?.join(', ')}]`);
+          } else {
+            log(`  ${modName}: ${modInfo.error || 'not available'}`);
           }
         }
-        log(`  DOM walk: ${info.domWalk?.elementsWithMeta?.length || 0} elements with Ember metadata`);
-        for (const elem of (info.domWalk?.elementsWithMeta || []).slice(0, 8)) {
-          log(`    <${elem.tag}> class="${elem.class?.substring(0, 60)}" source=${elem.source} keys=[${elem.metaKeys.join(',')}]${elem.hasView ? ' HAS_VIEW' : ''}${elem.hasComponent ? ' HAS_COMPONENT' : ''}${elem.containerKey ? ' key=' + elem.containerKey : ''}`);
-          if (elem.metaObjKeys) log(`      metaObj keys: ${elem.metaObjKeys.join(', ')}`);
+
+        // Log app search results
+        if (info.appSearch?.foundApp) {
+          log(`  App found: ${info.appSearch.foundApp}`);
         }
-        if (info.dragHandles?.length > 0) {
-          log(`  Drag handles: ${info.dragHandles.length}`);
-          for (const dh of info.dragHandles.slice(0, 3)) {
-            log(`    #${dh.index}: <${dh.tag}> emberKeys=[${dh.emberKeys.join(',')}] attrs=[${dh.attributes.join(', ')}] totalKeys=${dh.totalObjKeys}`);
-          }
+        if (info.appSearch?.appModules?.length > 0) {
+          log(`  App modules: ${info.appSearch.appModules.slice(0, 10).join(', ')}`);
         }
-        log(`  Addon patterns: sortable=${info.addonPatterns?.sortableItems}/${info.addonPatterns?.sortableGroup} emberActions=${info.addonPatterns?.emberActions} ariaGrabbed=${info.addonPatterns?.ariaGrabbed}`);
-        if (info.ownerFound) {
-          log(`  Ember owner FOUND on <${info.ownerElement?.tag}> level=${info.ownerElement?.level} via=${info.ownerElement?.viaPath}`);
-          if (info.lookupResults?.length > 0) {
-            log(`  Lookups: ${info.lookupResults.join(', ')}`);
+
+        // Log sortable item info
+        if (info.sortableItems?.length > 0) {
+          log(`  .sortable-item elements: ${info.sortableItems.length}`);
+          for (const si of info.sortableItems.slice(0, 3)) {
+            log(`    <${si.tag}> draggable=${si.draggable} objKeys=${si.objKeyCount} emberKeys=[${si.emberKeys.join(',')}] attrs=[${si.attrs.slice(0, 5).join(', ')}]`);
           }
         }
       }
 
-      // Now try the direct Ember reorder
+      // Try the Ember model reorder
       log('  Attempting Ember model reorder...');
       const emberResult = await CrossclimbDOM.pageEmberReorder(correctMiddleOrder);
       log(`  Ember reorder: ok=${emberResult.ok} componentFound=${emberResult.componentFound || false} reordered=${emberResult.reordered || false}`);

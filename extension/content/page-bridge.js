@@ -72,6 +72,18 @@
           emberReorder(d.targetWords, result);
           break;
 
+        case 'drag-capture-bypass':
+          doDragCaptureBypassAsync(d.srcSel, d.tgtSel, result);
+          return; // ack sent async
+
+        case 'drag-html5':
+          doDragHtml5Async(d.srcSel, d.tgtSel, result);
+          return; // ack sent async
+
+        case 'ember-explore-v2':
+          emberExploreV2(result);
+          break;
+
         default:
           result.ok = false;
           result.error = 'unknown action: ' + d.action;
@@ -621,6 +633,386 @@
     setTimeout(touchStep, 200);
   }
 
+  // ---- POINTER DRAG WITH setPointerCapture BYPASS ----
+  // The game's sortable library (ember-drag-drop or similar) likely calls
+  // element.setPointerCapture(event.pointerId) during pointerdown handling.
+  // This API requires isTrusted:true events — it silently fails for synthetic events,
+  // which causes the entire drag operation to be abandoned.
+  //
+  // Solution: Temporarily override setPointerCapture, releasePointerCapture, and
+  // hasPointerCapture to succeed silently for synthetic events. We also dispatch
+  // gotpointercapture/lostpointercapture events that the browser normally sends
+  // after a successful capture.
+
+  function doDragCaptureBypassAsync(srcSel, tgtSel, result) {
+    var srcEl = document.querySelector(srcSel);
+    var tgtEl = document.querySelector(tgtSel);
+    if (!srcEl || !tgtEl) {
+      result.ok = false;
+      result.error = 'elements not found';
+      window.postMessage(result, '*');
+      return;
+    }
+
+    // Save original methods
+    var origSet = Element.prototype.setPointerCapture;
+    var origRelease = Element.prototype.releasePointerCapture;
+    var origHas = Element.prototype.hasPointerCapture;
+
+    // Track captured pointer IDs so hasPointerCapture returns correctly
+    var capturedPointers = {};
+    result.captureOverridden = true;
+
+    Element.prototype.setPointerCapture = function(pointerId) {
+      capturedPointers[pointerId] = this;
+      result.captureAttempted = true;
+    };
+    Element.prototype.releasePointerCapture = function(pointerId) {
+      delete capturedPointers[pointerId];
+    };
+    Element.prototype.hasPointerCapture = function(pointerId) {
+      return capturedPointers[pointerId] === this;
+    };
+
+    var sr = srcEl.getBoundingClientRect();
+    var tr = tgtEl.getBoundingClientRect();
+    var sx = sr.left + sr.width / 2, sy = sr.top + sr.height / 2;
+    var ex = tr.left + tr.width / 2, ey = tr.top + tr.height / 2;
+
+    var ptrDown = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, width: 1, height: 1, pressure: 0.5 };
+    var ptrMove = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, width: 1, height: 1, pressure: 0.5 };
+    var ptrUp   = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, width: 1, height: 1, pressure: 0 };
+    var mouseDown = { button: 0, buttons: 1 };
+    var mouseMove = { button: 0, buttons: 1 };
+    var mouseUp   = { button: 0, buttons: 0 };
+
+    // pointerdown on source
+    srcEl.dispatchEvent(new PointerEvent('pointerdown', assign({
+      clientX: sx, clientY: sy, screenX: sx, screenY: sy, bubbles: true, cancelable: true
+    }, ptrDown)));
+
+    // Simulate gotpointercapture — the browser sends this after setPointerCapture succeeds
+    srcEl.dispatchEvent(new PointerEvent('gotpointercapture', assign({
+      clientX: sx, clientY: sy, screenX: sx, screenY: sy, bubbles: true, cancelable: true
+    }, ptrDown)));
+
+    srcEl.dispatchEvent(new MouseEvent('mousedown', assign({
+      clientX: sx, clientY: sy, screenX: sx, screenY: sy, bubbles: true, cancelable: true
+    }, mouseDown)));
+
+    var step = 0, steps = 25;
+    function dragStep() {
+      step++;
+      if (step > steps) {
+        // Restore originals BEFORE dispatching final events
+        Element.prototype.setPointerCapture = origSet;
+        Element.prototype.releasePointerCapture = origRelease;
+        Element.prototype.hasPointerCapture = origHas;
+
+        // pointerup + lostpointercapture at target position
+        srcEl.dispatchEvent(new PointerEvent('pointerup', assign({
+          clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true
+        }, ptrUp)));
+        srcEl.dispatchEvent(new PointerEvent('lostpointercapture', assign({
+          clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true
+        }, ptrUp)));
+        document.dispatchEvent(new PointerEvent('pointerup', assign({
+          clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true
+        }, ptrUp)));
+        srcEl.dispatchEvent(new MouseEvent('mouseup', assign({
+          clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true
+        }, mouseUp)));
+        document.dispatchEvent(new MouseEvent('mouseup', assign({
+          clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true
+        }, mouseUp)));
+
+        window.postMessage(result, '*');
+        return;
+      }
+
+      var t = step / steps;
+      var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      var cx = sx + (ex - sx) * e;
+      var cy = sy + (ey - sy) * e;
+      var moveOpts = { clientX: cx, clientY: cy, screenX: cx, screenY: cy, bubbles: true, cancelable: true };
+
+      srcEl.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+      document.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+      srcEl.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+      document.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+
+      // Also dispatch on element under cursor for drop target detection
+      var elAtPoint = document.elementFromPoint(cx, cy);
+      if (elAtPoint && elAtPoint !== srcEl && elAtPoint !== document.documentElement) {
+        elAtPoint.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+        elAtPoint.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+      }
+
+      setTimeout(dragStep, 16);
+    }
+    setTimeout(dragStep, 150);
+  }
+
+  // ---- HTML5 DRAG AND DROP ----
+  // The game uses ember-drag-drop addon, which listens for the HTML5 Drag and Drop API
+  // (dragstart, dragenter, dragover, drop, dragend) rather than pointer/touch events.
+  // This approach creates a DataTransfer object and dispatches the full DnD event sequence.
+
+  function doDragHtml5Async(srcSel, tgtSel, result) {
+    var srcEl = document.querySelector(srcSel);
+    var tgtEl = document.querySelector(tgtSel);
+    if (!srcEl || !tgtEl) {
+      result.ok = false;
+      result.error = 'elements not found';
+      window.postMessage(result, '*');
+      return;
+    }
+
+    var sr = srcEl.getBoundingClientRect();
+    var tr = tgtEl.getBoundingClientRect();
+    var sx = sr.left + sr.width / 2, sy = sr.top + sr.height / 2;
+    var ex = tr.left + tr.width / 2, ey = tr.top + tr.height / 2;
+
+    try {
+      var dataTransfer = new DataTransfer();
+      // Set some data — ember-drag-drop may check for this
+      dataTransfer.setData('text/plain', 'crossclimb-drag');
+      dataTransfer.effectAllowed = 'move';
+
+      // Step 1: dragstart on source
+      srcEl.dispatchEvent(new DragEvent('dragstart', {
+        dataTransfer: dataTransfer,
+        clientX: sx, clientY: sy,
+        screenX: sx, screenY: sy,
+        bubbles: true, cancelable: true
+      }));
+
+      result.html5Started = true;
+
+      // Step 2: drag sequence with intermediate positions
+      var step = 0, steps = 10;
+      function dndStep() {
+        step++;
+        if (step > steps) {
+          // Step 3: Final dragover + drop on target
+          dataTransfer.dropEffect = 'move';
+          tgtEl.dispatchEvent(new DragEvent('dragover', {
+            dataTransfer: dataTransfer,
+            clientX: ex, clientY: ey,
+            bubbles: true, cancelable: true
+          }));
+
+          tgtEl.dispatchEvent(new DragEvent('drop', {
+            dataTransfer: dataTransfer,
+            clientX: ex, clientY: ey,
+            screenX: ex, screenY: ey,
+            bubbles: true, cancelable: true
+          }));
+
+          srcEl.dispatchEvent(new DragEvent('dragend', {
+            dataTransfer: dataTransfer,
+            clientX: ex, clientY: ey,
+            bubbles: true, cancelable: true
+          }));
+
+          result.html5Completed = true;
+          window.postMessage(result, '*');
+          return;
+        }
+
+        var t = step / steps;
+        var cx = sx + (ex - sx) * t;
+        var cy = sy + (ey - sy) * t;
+
+        // dragover on the element under cursor
+        var elAtPt = document.elementFromPoint(cx, cy);
+        if (elAtPt) {
+          elAtPt.dispatchEvent(new DragEvent('dragenter', {
+            dataTransfer: dataTransfer,
+            clientX: cx, clientY: cy,
+            bubbles: true, cancelable: true
+          }));
+          elAtPt.dispatchEvent(new DragEvent('dragover', {
+            dataTransfer: dataTransfer,
+            clientX: cx, clientY: cy,
+            bubbles: true, cancelable: true
+          }));
+        }
+
+        setTimeout(dndStep, 50);
+      }
+      setTimeout(dndStep, 100);
+    } catch (err) {
+      result.ok = false;
+      result.error = 'html5 dnd error: ' + err.message;
+      window.postMessage(result, '*');
+    }
+  }
+
+  // ---- EMBER EXPLORATION V2 ----
+  // Improved version that searches requirejs for crossclimb-specific modules
+  // and attempts to load the drag-coordinator service directly.
+
+  function emberExploreV2(result) {
+    var info = {};
+
+    // --- 1. Targeted module search ---
+    info.modules = {};
+    if (typeof requirejs !== 'undefined') {
+      var entries = requirejs.entries || {};
+      var allModules = Object.keys(entries);
+      info.modules.total = allModules.length;
+
+      // Search for crossclimb-specific modules
+      info.modules.crossclimb = allModules.filter(function(m) {
+        return m.indexOf('crossclimb') >= 0;
+      }).slice(0, 30);
+
+      // Search for sortable-specific modules
+      info.modules.sortable = allModules.filter(function(m) {
+        return m.indexOf('sortable') >= 0;
+      }).slice(0, 20);
+
+      // Search for the game route/controller/component modules
+      info.modules.playRoutes = allModules.filter(function(m) {
+        return m.indexOf('play-routes') >= 0 || m.indexOf('play_routes') >= 0;
+      }).slice(0, 20);
+
+      // Search for ember-drag-drop specifically
+      info.modules.dragDrop = allModules.filter(function(m) {
+        return m.indexOf('ember-drag-drop') >= 0;
+      });
+    }
+
+    // --- 2. Try to load and inspect the drag-coordinator service ---
+    info.dragCoordinator = { loaded: false };
+    if (typeof requirejs !== 'undefined') {
+      try {
+        var coordModule = requirejs('ember-drag-drop/services/drag-coordinator');
+        if (coordModule && coordModule.default) {
+          info.dragCoordinator.loaded = true;
+          info.dragCoordinator.moduleKeys = Object.keys(coordModule).slice(0, 20);
+          info.dragCoordinator.defaultKeys = Object.keys(coordModule.default).slice(0, 20);
+          // Check prototype for available methods
+          if (coordModule.default.prototype) {
+            info.dragCoordinator.protoKeys = Object.keys(coordModule.default.prototype).slice(0, 30);
+          }
+          // Check for PrototypeMixin (classic Ember class pattern)
+          if (coordModule.default.PrototypeMixin) {
+            var mixinProps = [];
+            coordModule.default.PrototypeMixin.mixins.forEach(function(m) {
+              if (m.properties) {
+                mixinProps = mixinProps.concat(Object.keys(m.properties));
+              }
+            });
+            info.dragCoordinator.mixinProps = mixinProps.slice(0, 30);
+          }
+        }
+      } catch (e) {
+        info.dragCoordinator.error = e.message;
+      }
+    }
+
+    // --- 3. Try to load the sortable-objects component ---
+    info.sortableObjects = { loaded: false };
+    if (typeof requirejs !== 'undefined') {
+      try {
+        var sortModule = requirejs('ember-drag-drop/components/sortable-objects');
+        if (sortModule && sortModule.default) {
+          info.sortableObjects.loaded = true;
+          info.sortableObjects.moduleKeys = Object.keys(sortModule).slice(0, 20);
+          if (sortModule.default.prototype) {
+            info.sortableObjects.protoKeys = Object.keys(sortModule.default.prototype).slice(0, 30);
+          }
+          if (sortModule.default.PrototypeMixin) {
+            var soProps = [];
+            sortModule.default.PrototypeMixin.mixins.forEach(function(m) {
+              if (m.properties) {
+                soProps = soProps.concat(Object.keys(m.properties));
+              }
+            });
+            info.sortableObjects.mixinProps = soProps.slice(0, 30);
+          }
+        }
+      } catch (e) {
+        info.sortableObjects.error = e.message;
+      }
+    }
+
+    // --- 4. Try loading Ember utilities via requirejs ---
+    info.emberUtils = {};
+    var utilModules = [
+      ['@ember/application', 'getOwner'],
+      ['@ember/runloop', 'run,schedule,next'],
+      ['@ember/object', 'get,set,notifyPropertyChange'],
+      ['@ember/debug', 'inspect']
+    ];
+    for (var ui = 0; ui < utilModules.length; ui++) {
+      var modName = utilModules[ui][0];
+      var expectFns = utilModules[ui][1];
+      try {
+        var mod = requirejs(modName);
+        if (mod) {
+          info.emberUtils[modName] = {
+            loaded: true,
+            keys: Object.keys(mod).slice(0, 20),
+            hasFns: expectFns.split(',').filter(function(fn) { return typeof mod[fn] === 'function'; })
+          };
+        }
+      } catch (e) {
+        info.emberUtils[modName] = { loaded: false, error: e.message };
+      }
+    }
+
+    // --- 5. Try to find the Ember app instance via requirejs ---
+    info.appSearch = {};
+    if (typeof requirejs !== 'undefined') {
+      var entries2 = requirejs.entries || {};
+      // Look for app module patterns
+      var appModules = Object.keys(entries2).filter(function(m) {
+        return m.match(/\/app$/) || m.match(/\/application\//) || m.match(/instance-initializer/);
+      }).slice(0, 20);
+      info.appSearch.appModules = appModules;
+
+      // Look for the main app by checking common LinkedIn Ember app names
+      var appNames = ['voyager-web', 'linkedin-voyager-web', 'ember-app'];
+      for (var an = 0; an < appNames.length; an++) {
+        try {
+          var appMod = requirejs(appNames[an] + '/app');
+          if (appMod) {
+            info.appSearch.foundApp = appNames[an];
+            info.appSearch.appKeys = Object.keys(appMod).slice(0, 20);
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    // --- 6. Inspect .sortable-item elements ---
+    info.sortableItems = [];
+    var items = document.querySelectorAll('.sortable-item');
+    for (var si = 0; si < items.length; si++) {
+      var item = items[si];
+      var iAttrs = [];
+      for (var ia = 0; ia < item.attributes.length; ia++) {
+        iAttrs.push(item.attributes[ia].name + '=' + item.attributes[ia].value.substring(0, 50));
+      }
+      info.sortableItems.push({
+        tag: item.tagName,
+        class: (item.className || '').toString().substring(0, 100),
+        attrs: iAttrs,
+        childCount: item.children.length,
+        draggable: item.draggable,
+        objKeyCount: Object.keys(item).length,
+        emberKeys: Object.keys(item).filter(function(k) {
+          return k.indexOf('ember') >= 0 || k.indexOf('glimmer') >= 0;
+        })
+      });
+    }
+
+    result.data = info;
+  }
+
   // ---- EMBER EXPLORATION ----
   // Comprehensive diagnostic that inspects the Ember.js framework internals
   // to understand how the game's sortable list is managed.
@@ -1131,5 +1523,5 @@
     return Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top);
   }
 
-  console.log('[CrossclimbSolver] Page bridge v3 ready (touch drag + Ember exploration)');
+  console.log('[CrossclimbSolver] Page bridge v4 ready (capture bypass + HTML5 DnD + Ember v2)');
 })();

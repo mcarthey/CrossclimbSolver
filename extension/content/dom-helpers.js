@@ -501,6 +501,21 @@ const CrossclimbDOM = {
     return this._bridgeCmd('ember-reorder', { targetWords }, 5000);
   },
 
+  // Pointer drag with setPointerCapture bypass
+  async pageDragCaptureBypass(srcSel, tgtSel) {
+    return this._bridgeCmd('drag-capture-bypass', { srcSel, tgtSel }, 8000);
+  },
+
+  // HTML5 Drag and Drop API drag (for ember-drag-drop compatibility)
+  async pageDragHtml5(srcSel, tgtSel) {
+    return this._bridgeCmd('drag-html5', { srcSel, tgtSel }, 8000);
+  },
+
+  // Enhanced Ember exploration with module loading
+  async pageEmberExploreV2() {
+    return this._bridgeCmd('ember-explore-v2', {}, 10000);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {
