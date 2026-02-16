@@ -481,6 +481,11 @@ const CrossclimbDOM = {
     return this._bridgeCmd('read-order', {}, 3000);
   },
 
+  // Directly reorder DOM elements to match target word order (fallback when drag fails)
+  async pageReorderDOM(targetWords) {
+    return this._bridgeCmd('reorder-dom', { targetWords }, 5000);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {

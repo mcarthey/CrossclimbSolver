@@ -56,6 +56,10 @@
           result.data = readBoardOrder();
           break;
 
+        case 'reorder-dom':
+          reorderDOM(d.targetWords, result);
+          break;
+
         default:
           result.ok = false;
           result.error = 'unknown action: ' + d.action;
@@ -335,32 +339,167 @@
     var tr = tgtEl.getBoundingClientRect();
     var sx = sr.left + sr.width / 2, sy = sr.top + sr.height / 2;
     var ex = tr.left + tr.width / 2, ey = tr.top + tr.height / 2;
-    var pp = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
 
-    srcEl.dispatchEvent(new PointerEvent('pointerdown', assign({ clientX: sx, clientY: sy, bubbles: true, cancelable: true }, pp)));
-    srcEl.dispatchEvent(new MouseEvent('mousedown', { clientX: sx, clientY: sy, bubbles: true, cancelable: true }));
+    // Full pointer properties — button/buttons are critical for drag recognition
+    var ptrDown = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, width: 1, height: 1, pressure: 0.5 };
+    var ptrMove = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, width: 1, height: 1, pressure: 0.5 };
+    var ptrUp   = { pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 0, width: 1, height: 1, pressure: 0 };
+    var mouseDown = { button: 0, buttons: 1 };
+    var mouseMove = { button: 0, buttons: 1 };
+    var mouseUp   = { button: 0, buttons: 0 };
+
+    // Pointerdown on source
+    srcEl.dispatchEvent(new PointerEvent('pointerdown', assign({ clientX: sx, clientY: sy, screenX: sx, screenY: sy, bubbles: true, cancelable: true }, ptrDown)));
+    srcEl.dispatchEvent(new MouseEvent('mousedown', assign({ clientX: sx, clientY: sy, screenX: sx, screenY: sy, bubbles: true, cancelable: true }, mouseDown)));
 
     var step = 0, steps = 20;
     function dragStep() {
       step++;
       if (step > steps) {
-        srcEl.dispatchEvent(new PointerEvent('pointerup', assign({ clientX: ex, clientY: ey, bubbles: true, cancelable: true }, pp)));
-        document.dispatchEvent(new PointerEvent('pointerup', assign({ clientX: ex, clientY: ey, bubbles: true, cancelable: true }, pp)));
-        srcEl.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true, cancelable: true }));
-        document.dispatchEvent(new MouseEvent('mouseup', { clientX: ex, clientY: ey, bubbles: true, cancelable: true }));
+        // Pointerup at target position
+        srcEl.dispatchEvent(new PointerEvent('pointerup', assign({ clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true }, ptrUp)));
+        document.dispatchEvent(new PointerEvent('pointerup', assign({ clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true }, ptrUp)));
+        srcEl.dispatchEvent(new MouseEvent('mouseup', assign({ clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true }, mouseUp)));
+        document.dispatchEvent(new MouseEvent('mouseup', assign({ clientX: ex, clientY: ey, screenX: ex, screenY: ey, bubbles: true, cancelable: true }, mouseUp)));
         window.postMessage(result, '*');
         return;
       }
       var t = step / steps;
       var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
       var cx = sx + (ex - sx) * e, cy = sy + (ey - sy) * e;
-      srcEl.dispatchEvent(new PointerEvent('pointermove', assign({ clientX: cx, clientY: cy, bubbles: true, cancelable: true }, pp)));
-      document.dispatchEvent(new PointerEvent('pointermove', assign({ clientX: cx, clientY: cy, bubbles: true, cancelable: true }, pp)));
-      srcEl.dispatchEvent(new MouseEvent('mousemove', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
-      document.dispatchEvent(new MouseEvent('mousemove', { clientX: cx, clientY: cy, bubbles: true, cancelable: true }));
+      var moveOpts = { clientX: cx, clientY: cy, screenX: cx, screenY: cy, bubbles: true, cancelable: true };
+
+      // Dispatch on source, document, AND element under cursor
+      srcEl.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+      document.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+      srcEl.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+      document.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+
+      var elAtPoint = document.elementFromPoint(cx, cy);
+      if (elAtPoint && elAtPoint !== srcEl && elAtPoint !== document.documentElement) {
+        elAtPoint.dispatchEvent(new PointerEvent('pointermove', assign({}, moveOpts, ptrMove)));
+        elAtPoint.dispatchEvent(new MouseEvent('mousemove', assign({}, moveOpts, mouseMove)));
+      }
+
       setTimeout(dragStep, 16);
     }
     setTimeout(dragStep, 150);
+  }
+
+  // ---- DOM REORDER (fallback when drag events are ignored) ----
+  // Directly rearranges DOM children of the sortable container to match the target order.
+  // Then attempts to notify the Ember/framework layer of the change.
+
+  function reorderDOM(targetWords, result) {
+    var container = document.querySelector('.crossclimb__guess__container');
+    if (!container) {
+      result.ok = false;
+      result.error = 'no guess container found';
+      return;
+    }
+
+    // Get all middle rows sorted by current visual position
+    var middleRows = [];
+    var allChildren = container.querySelectorAll('.crossclimb__guess--middle');
+    for (var i = 0; i < allChildren.length; i++) {
+      var row = allChildren[i];
+      var inputs = row.querySelectorAll('.crossclimb__guess_box input');
+      var word = '';
+      for (var j = 0; j < inputs.length; j++) {
+        word += (inputs[j].value || '').toUpperCase();
+      }
+      middleRows.push({ el: row, word: word, y: row.getBoundingClientRect().top });
+    }
+    middleRows.sort(function(a, b) { return a.y - b.y; });
+
+    // Build a word-to-element map
+    var wordMap = {};
+    for (var k = 0; k < middleRows.length; k++) {
+      wordMap[middleRows[k].word] = middleRows[k].el;
+    }
+
+    // Find the locked top row (reference point for insertion)
+    var lockedTop = container.querySelector('.crossclimb__guess--lock') ||
+                    container.parentElement.querySelector('.crossclimb__guess--lock');
+    // Find the first non-locked element as reference
+    var firstMiddle = middleRows.length > 0 ? middleRows[0].el : null;
+
+    // Reorder: insert each row in target order
+    var reordered = 0;
+    for (var m = 0; m < targetWords.length; m++) {
+      var targetEl = wordMap[targetWords[m]];
+      if (!targetEl) {
+        result.error = 'word not found in DOM: ' + targetWords[m];
+        continue;
+      }
+
+      // Get the reference element: the item currently at this position
+      var currentAtPos = container.querySelectorAll('.crossclimb__guess--middle');
+      var currentSorted = Array.prototype.slice.call(currentAtPos);
+      currentSorted.sort(function(a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+
+      if (m < currentSorted.length && currentSorted[m] !== targetEl) {
+        // Insert targetEl before the element currently at position m
+        container.insertBefore(targetEl, currentSorted[m]);
+        reordered++;
+      }
+    }
+
+    result.reordered = reordered;
+
+    // Re-tag with data-cs-row
+    var finalRows = container.querySelectorAll('.crossclimb__guess--middle');
+    var sorted = Array.prototype.slice.call(finalRows);
+    sorted.sort(function(a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+    for (var n = 0; n < sorted.length; n++) {
+      sorted[n].setAttribute('data-cs-row', String(n));
+    }
+
+    // Try to notify the framework of the change
+    // Strategy 1: Dispatch events on the container
+    container.dispatchEvent(new Event('change', { bubbles: true }));
+    container.dispatchEvent(new Event('input', { bubbles: true }));
+
+    // Strategy 2: Try to trigger Ember rerender via Ember.run if available
+    if (typeof Ember !== 'undefined' && Ember.run) {
+      try {
+        Ember.run(function() {
+          // Try to find and notify the Ember component
+          var emberKeys = Object.keys(container);
+          for (var ek = 0; ek < emberKeys.length; ek++) {
+            if (emberKeys[ek].indexOf('__ember') === 0) {
+              result.emberKey = emberKeys[ek];
+              break;
+            }
+          }
+        });
+      } catch (e) {
+        result.emberError = e.message;
+      }
+    }
+
+    // Strategy 3: Find the Ember view/component and trigger a rerender
+    try {
+      var viewKeys = Object.keys(container).filter(function(k) {
+        return k.startsWith('__ember_meta__') || k.startsWith('__ember');
+      });
+      result.emberViewKeys = viewKeys;
+
+      // Also check parent elements for Ember component
+      var parent = container.parentElement;
+      while (parent && parent !== document.body) {
+        var pKeys = Object.keys(parent).filter(function(k) {
+          return k.startsWith('__ember');
+        });
+        if (pKeys.length > 0) {
+          result.parentEmberKeys = pKeys;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+    } catch (e) {
+      result.emberSearchError = e.message;
+    }
   }
 
   // ---- READ BOARD ORDER ----
