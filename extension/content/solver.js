@@ -109,57 +109,61 @@ const Solver = {
         log(`  Contenteditable elements: ${d.editableCount || 0}`);
       }
 
-      // Step 4: Fill in each middle row
-      status('solving', 'Filling in answers...');
-      const filledAnswers = []; // track what we put where
+      // Step 4: Read all clues first (don't fill yet — prevents cascade failures)
+      // Previously, we read a clue and immediately filled its row. If clue matching
+      // failed (e.g. error message on row 1), the fallback "stole" a word that a
+      // later row's clue would have matched. Two-pass approach fixes this.
+      status('solving', 'Reading clues from all rows...');
+      const rowClues = [];
 
       for (let i = 0; i < board.middleRows.length; i++) {
         const row = board.middleRows[i];
-        status('solving', `Working on row ${i + 1}/${board.middleRows.length}...`);
+        status('solving', `Reading clue ${i + 1}/${board.middleRows.length}...`);
+        await this._activateRow(row);
+        await CrossclimbDOM.sleep(400);
+        const clueText = this._readActiveClue(board.gridContainer);
+        rowClues.push({ index: i, clue: clueText });
+        log(`Row ${i + 1} clue: "${clueText || '(none)'}"`);
+      }
 
-        // Click the row to activate it
+      // Log source clue-answer pairs for debugging
+      log('Source clue-answer pairs:');
+      for (const pair of puzzleData.clueAnswerPairs) {
+        log(`  "${pair.clue}" → ${pair.answer}`);
+      }
+
+      // Step 5: Global clue-to-answer matching (all clues at once)
+      status('solving', 'Matching clues to answers...');
+      const assignments = this._globalMatchClues(rowClues, puzzleData, middleAnswers, log);
+      log(`Assignments: ${assignments.map(a => `Row ${a.index + 1}=${a.answer}`).join(', ')}`);
+
+      // Step 6: Fill each row with its assigned answer (second pass)
+      status('solving', 'Filling in answers...');
+      const filledAnswers = [];
+
+      for (const assignment of assignments) {
+        const i = assignment.index;
+        const row = board.middleRows[i];
+        status('solving', `Filling row ${i + 1}/${board.middleRows.length} with ${assignment.answer}...`);
+
         await this._activateRow(row);
         await CrossclimbDOM.sleep(400);
 
-        // Read the clue that appears for this row
-        const clueText = this._readActiveClue(board.gridContainer);
-        log(`Row ${i + 1} clue: "${clueText || '(none)'}"`);
-
-        // Match clue to an answer
-        let answer = null;
-        if (clueText) {
-          answer = this._matchClueToAnswer(clueText, puzzleData, filledAnswers.map(f => f.answer));
-        }
-
-        // If clue matching failed, use position-based assignment
-        if (!answer) {
-          const remaining = middleAnswers.filter(a => !filledAnswers.some(f => f.answer === a));
-          if (remaining.length > 0) {
-            answer = remaining[0];
-            log(`  No clue match, using fallback: ${answer}`);
-          }
-        }
-
-        if (!answer) {
-          log(`  WARNING: No answer available for row ${i + 1}`);
-          continue;
-        }
-
-        log(`Typing "${answer}" into row ${i + 1}`);
-        await this._typeIntoRow(row, answer, board, log);
-        filledAnswers.push({ answer, rowElement: row, index: i });
+        log(`Typing "${assignment.answer}" into row ${i + 1}`);
+        await this._typeIntoRow(row, assignment.answer, board, log);
+        filledAnswers.push({ answer: assignment.answer, rowElement: row, index: i });
         await CrossclimbDOM.sleep(500);
       }
 
       log(`Filled ${filledAnswers.length}/${board.middleRows.length} rows`);
 
-      // Step 4: Reorder rows to form the correct word ladder
+      // Step 7: Reorder rows to form the correct word ladder
       if (filledAnswers.length >= 2) {
         status('reordering', 'Reordering rows...');
         await this._reorderMiddleRows(board, middleAnswers, filledAnswers, log);
       }
 
-      // Step 5: Fill start/end words into the locked rows (which unlock after correct ordering)
+      // Step 8: Fill start/end words into the locked rows (which unlock after correct ordering)
       if (puzzleData.startWord && puzzleData.endWord) {
         status('solving', 'Checking for endpoint rows...');
         await CrossclimbDOM.sleep(2000); // Wait for game to process correct ordering
@@ -382,6 +386,104 @@ const Solver = {
     }
 
     return bestScore > 0.3 ? bestMatch : null;
+  },
+
+  // ----- GLOBAL CLUE MATCHING -----
+
+  _globalMatchClues(rowClues, puzzleData, middleAnswers, log) {
+    const pairs = puzzleData.clueAnswerPairs;
+    const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+
+    // Detect error messages (not real clues)
+    const isErrorClue = (clue) => {
+      if (!clue) return true;
+      const lower = clue.toLowerCase();
+      return lower.includes('wrong') || lower.includes('incorrect') ||
+             lower.includes('try again') || lower.includes('not quite') ||
+             lower.length > 150;
+    };
+
+    const assignments = new Array(rowClues.length).fill(null);
+    const usedAnswers = new Set();
+
+    // Pass 1: Exact matches (normalized)
+    for (let i = 0; i < rowClues.length; i++) {
+      const { clue } = rowClues[i];
+      if (isErrorClue(clue)) continue;
+      const clueNorm = normalize(clue);
+
+      for (const pair of pairs) {
+        if (usedAnswers.has(pair.answer)) continue;
+        if (clueNorm === normalize(pair.clue)) {
+          assignments[i] = pair.answer;
+          usedAnswers.add(pair.answer);
+          log(`  Exact match: Row ${i + 1} → ${pair.answer}`);
+          break;
+        }
+      }
+    }
+
+    // Pass 2: Substring matches
+    for (let i = 0; i < rowClues.length; i++) {
+      if (assignments[i]) continue;
+      const { clue } = rowClues[i];
+      if (isErrorClue(clue)) continue;
+      const clueNorm = normalize(clue);
+
+      for (const pair of pairs) {
+        if (usedAnswers.has(pair.answer)) continue;
+        const pairNorm = normalize(pair.clue);
+        if (clueNorm.includes(pairNorm) || pairNorm.includes(clueNorm)) {
+          assignments[i] = pair.answer;
+          usedAnswers.add(pair.answer);
+          log(`  Substring match: Row ${i + 1} → ${pair.answer}`);
+          break;
+        }
+      }
+    }
+
+    // Pass 3: Jaccard similarity (best match above threshold)
+    for (let i = 0; i < rowClues.length; i++) {
+      if (assignments[i]) continue;
+      const { clue } = rowClues[i];
+      if (isErrorClue(clue)) continue;
+      const clueNorm = normalize(clue);
+      const wordsA = new Set(clueNorm.split(' '));
+
+      let bestMatch = null;
+      let bestScore = 0;
+
+      for (const pair of pairs) {
+        if (usedAnswers.has(pair.answer)) continue;
+        const pairNorm = normalize(pair.clue);
+        const wordsB = new Set(pairNorm.split(' '));
+        const intersection = new Set([...wordsA].filter(w => wordsB.has(w)));
+        const union = new Set([...wordsA, ...wordsB]);
+        const jaccard = intersection.size / union.size;
+        if (jaccard > bestScore) { bestScore = jaccard; bestMatch = pair.answer; }
+      }
+
+      if (bestScore > 0.3 && bestMatch) {
+        assignments[i] = bestMatch;
+        usedAnswers.add(bestMatch);
+        log(`  Fuzzy match (${bestScore.toFixed(2)}): Row ${i + 1} → ${bestMatch}`);
+      }
+    }
+
+    // Pass 4: Assign remaining answers to remaining rows (position-based fallback)
+    const remainingAnswers = middleAnswers.filter(a => !usedAnswers.has(a));
+    let remainIdx = 0;
+    for (let i = 0; i < rowClues.length; i++) {
+      if (assignments[i]) continue;
+      if (remainIdx < remainingAnswers.length) {
+        assignments[i] = remainingAnswers[remainIdx++];
+        log(`  Fallback: Row ${i + 1} → ${assignments[i]}`);
+      }
+    }
+
+    return assignments
+      .map((answer, i) => ({ index: i, answer }))
+      .filter(a => a.answer);
   },
 
   // ----- TYPING -----
