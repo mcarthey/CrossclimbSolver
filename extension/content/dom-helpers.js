@@ -486,6 +486,21 @@ const CrossclimbDOM = {
     return this._bridgeCmd('reorder-dom', { targetWords }, 5000);
   },
 
+  // Touch-event drag simulation (alternative to pointer events)
+  async pageDragTouch(srcSel, tgtSel) {
+    return this._bridgeCmd('drag-touch', { srcSel, tgtSel }, 8000);
+  },
+
+  // Explore Ember.js framework internals to understand the game's component tree
+  async pageEmberExplore() {
+    return this._bridgeCmd('ember-explore', {}, 5000);
+  },
+
+  // Attempt to reorder via Ember's internal component model
+  async pageEmberReorder(targetWords) {
+    return this._bridgeCmd('ember-reorder', { targetWords }, 5000);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {

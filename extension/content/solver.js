@@ -426,6 +426,11 @@ const Solver = {
       return result.data.rows; // [{word, csRow, y}, ...]
     };
 
+    const isCorrect = (rows) => {
+      if (!rows) return false;
+      return JSON.stringify(rows.map(r => r.word)) === JSON.stringify(correctMiddleOrder);
+    };
+
     let current = await readOrder();
     if (!current || current.length === 0) {
       log('Could not read board order');
@@ -436,94 +441,226 @@ const Solver = {
     log(`Current order: ${currentWords.join(' → ')}`);
     log(`Target order:  ${correctMiddleOrder.join(' → ')}`);
 
-    if (JSON.stringify(currentWords) === JSON.stringify(correctMiddleOrder)) {
+    if (isCorrect(current)) {
       log('Rows already in correct order!');
       return;
     }
 
-    // Phase 1: Try pointer-event drag simulation
-    log('Phase 1: Attempting drag-and-drop reordering...');
-    let dragWorked = false;
-    const MAX_DRAG_ATTEMPTS = 3; // Only try a few drags before falling back
+    // ──── Phase 1: Pointer-event drag ────
+    // Dispatches synthetic PointerEvent/MouseEvent sequences on the drag handles.
+    // This is the "normal" way to simulate drag-and-drop but fails if the game
+    // checks event.isTrusted (which is always false for synthetic events).
+    log('Phase 1: Attempting pointer-event drag...');
+    let reordered = false;
 
-    for (let pass = 0; pass < MAX_DRAG_ATTEMPTS; pass++) {
-      current = await readOrder();
-      if (!current) break;
-
+    // Try just one drag to detect if the game responds to pointer events
+    {
       const words = current.map(r => r.word);
-      if (JSON.stringify(words) === JSON.stringify(correctMiddleOrder)) {
-        log('Rows in correct order!');
-        dragWorked = true;
-        break;
-      }
+      let wrongIdx = words.findIndex((w, i) => w !== correctMiddleOrder[i]);
+      if (wrongIdx >= 0) {
+        const targetWord = correctMiddleOrder[wrongIdx];
+        const sourceIdx = words.indexOf(targetWord);
+        if (sourceIdx >= 0) {
+          const srcCsRow = current[sourceIdx].csRow;
+          const tgtCsRow = current[wrongIdx].csRow;
+          const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
+          const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
 
-      // Find the first wrong position
-      let wrongIdx = -1;
-      for (let i = 0; i < correctMiddleOrder.length; i++) {
-        if (words[i] !== correctMiddleOrder[i]) {
-          wrongIdx = i;
-          break;
+          log(`  Moving "${targetWord}" pos ${sourceIdx}→${wrongIdx} via pointer events`);
+          const dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
+          log(`  Pointer drag: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
+          await CrossclimbDOM.sleep(800);
+
+          const afterDrag = await readOrder();
+          if (isCorrect(afterDrag)) {
+            log('  Pointer drag succeeded!');
+            reordered = true;
+          } else if (afterDrag && JSON.stringify(afterDrag.map(r => r.word)) === JSON.stringify(words)) {
+            log('  Pointer drag had no effect — game ignores synthetic pointer events');
+          } else if (afterDrag) {
+            log(`  After drag: ${afterDrag.map(r => r.word).join(' → ')}`);
+            // Drag had partial effect — continue with pointer drags
+            for (let pass = 0; pass < 5 && !reordered; pass++) {
+              current = await readOrder();
+              if (isCorrect(current)) { reordered = true; break; }
+              const w = current.map(r => r.word);
+              const wi = w.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
+              if (wi < 0) { reordered = true; break; }
+              const tw = correctMiddleOrder[wi];
+              const si = w.indexOf(tw);
+              if (si < 0) break;
+              await CrossclimbDOM.pageDrag(
+                `[data-cs-row="${current[si].csRow}"] .crossclimb__guess-dragger`,
+                `[data-cs-row="${current[wi].csRow}"] .crossclimb__guess-dragger`
+              );
+              await CrossclimbDOM.sleep(800);
+            }
+            current = await readOrder();
+            if (isCorrect(current)) reordered = true;
+          }
         }
-      }
-      if (wrongIdx === -1) { dragWorked = true; break; }
-
-      const targetWord = correctMiddleOrder[wrongIdx];
-      const sourceIdx = words.indexOf(targetWord);
-      if (sourceIdx === -1) {
-        log(`WARNING: "${targetWord}" not found in current rows`);
-        break;
-      }
-
-      log(`Moving "${targetWord}" from position ${sourceIdx} to ${wrongIdx}`);
-      const srcCsRow = current[sourceIdx].csRow;
-      const tgtCsRow = current[wrongIdx].csRow;
-
-      // Try dragging the dragger handles
-      const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
-      const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
-      const dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
-      log(`  Drag dragger: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
-
-      if (!dragResult.ok) {
-        // Try dragging the row itself
-        const dragResult2 = await CrossclimbDOM.pageDrag(
-          `[data-cs-row="${srcCsRow}"]`, `[data-cs-row="${tgtCsRow}"]`
-        );
-        log(`  Drag row: ok=${dragResult2.ok}`);
-      }
-
-      await CrossclimbDOM.sleep(1200);
-
-      // Check if the drag actually changed anything
-      const afterDrag = await readOrder();
-      if (afterDrag) {
-        const afterWords = afterDrag.map(r => r.word);
-        if (JSON.stringify(afterWords) === JSON.stringify(words)) {
-          log('  Drag had no effect — game ignored synthetic events');
-          break; // Stop trying drags, fall through to DOM reorder
-        }
-        log(`  After drag: ${afterWords.join(' → ')}`);
       }
     }
 
-    // Phase 2: If drag didn't work, use direct DOM reorder
-    if (!dragWorked) {
-      const checkCurrent = await readOrder();
-      if (checkCurrent) {
-        const checkWords = checkCurrent.map(r => r.word);
-        if (JSON.stringify(checkWords) !== JSON.stringify(correctMiddleOrder)) {
-          log('Phase 2: Drag failed, using direct DOM reorder...');
-          const reorderResult = await CrossclimbDOM.pageReorderDOM(correctMiddleOrder);
-          log(`  DOM reorder: ok=${reorderResult.ok} moved=${reorderResult.reordered || 0}${reorderResult.error ? ' err=' + reorderResult.error : ''}`);
-          if (reorderResult.emberViewKeys) {
-            log(`  Ember keys on container: ${reorderResult.emberViewKeys.join(', ') || 'none'}`);
-          }
-          if (reorderResult.parentEmberKeys) {
-            log(`  Ember keys on parent: ${reorderResult.parentEmberKeys.join(', ') || 'none'}`);
-          }
+    // ──── Phase 2: Touch-event drag ────
+    // Touch events go through a different code path in many sortable libraries.
+    // Ember-sortable and similar addons often have dedicated touch handlers that
+    // may accept synthetic touch events even though synthetic pointer events are blocked.
+    if (!reordered) {
+      log('Phase 2: Attempting touch-event drag...');
+      current = await readOrder();
+      if (current && !isCorrect(current)) {
+        const words = current.map(r => r.word);
+        let wrongIdx = words.findIndex((w, i) => w !== correctMiddleOrder[i]);
+        if (wrongIdx >= 0) {
+          const targetWord = correctMiddleOrder[wrongIdx];
+          const sourceIdx = words.indexOf(targetWord);
+          if (sourceIdx >= 0) {
+            const srcCsRow = current[sourceIdx].csRow;
+            const tgtCsRow = current[wrongIdx].csRow;
+            // Touch the drag handle
+            const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
+            const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
 
-          await CrossclimbDOM.sleep(1000);
+            log(`  Moving "${targetWord}" pos ${sourceIdx}→${wrongIdx} via touch events`);
+            const touchResult = await CrossclimbDOM.pageDragTouch(srcSel, tgtSel);
+            log(`  Touch drag: ok=${touchResult.ok}${touchResult.error ? ' err=' + touchResult.error : ''}`);
+            await CrossclimbDOM.sleep(800);
+
+            const afterTouch = await readOrder();
+            if (isCorrect(afterTouch)) {
+              log('  Touch drag succeeded!');
+              reordered = true;
+            } else if (afterTouch && JSON.stringify(afterTouch.map(r => r.word)) === JSON.stringify(words)) {
+              log('  Touch drag had no effect — game ignores synthetic touch events too');
+            } else if (afterTouch) {
+              log(`  After touch: ${afterTouch.map(r => r.word).join(' → ')}`);
+              // Touch had partial effect — continue with touch drags
+              for (let pass = 0; pass < 5 && !reordered; pass++) {
+                current = await readOrder();
+                if (isCorrect(current)) { reordered = true; break; }
+                const w = current.map(r => r.word);
+                const wi = w.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
+                if (wi < 0) { reordered = true; break; }
+                const tw = correctMiddleOrder[wi];
+                const si = w.indexOf(tw);
+                if (si < 0) break;
+                await CrossclimbDOM.pageDragTouch(
+                  `[data-cs-row="${current[si].csRow}"] .crossclimb__guess-dragger`,
+                  `[data-cs-row="${current[wi].csRow}"] .crossclimb__guess-dragger`
+                );
+                await CrossclimbDOM.sleep(800);
+              }
+              current = await readOrder();
+              if (isCorrect(current)) reordered = true;
+            }
+
+            // Also try touching the row itself (not just the dragger handle)
+            if (!reordered) {
+              current = await readOrder();
+              if (current && !isCorrect(current)) {
+                const w2 = current.map(r => r.word);
+                const wi2 = w2.findIndex((ww, i) => ww !== correctMiddleOrder[i]);
+                if (wi2 >= 0) {
+                  const tw2 = correctMiddleOrder[wi2];
+                  const si2 = w2.indexOf(tw2);
+                  if (si2 >= 0) {
+                    log(`  Retrying touch on row element (not dragger)...`);
+                    await CrossclimbDOM.pageDragTouch(
+                      `[data-cs-row="${current[si2].csRow}"]`,
+                      `[data-cs-row="${current[wi2].csRow}"]`
+                    );
+                    await CrossclimbDOM.sleep(800);
+                    const afterTouch2 = await readOrder();
+                    if (isCorrect(afterTouch2)) {
+                      log('  Touch on row succeeded!');
+                      reordered = true;
+                    } else if (afterTouch2) {
+                      log(`  Touch on row: ${JSON.stringify(afterTouch2.map(r => r.word)) === JSON.stringify(w2) ? 'no effect' : afterTouch2.map(r => r.word).join(' → ')}`);
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
+      }
+    }
+
+    // ──── Phase 3: Ember exploration + direct model reorder ────
+    // This phase inspects Ember's internal component tree to find the sortable
+    // list's backing data model and directly mutate it. This is the most reliable
+    // approach because it bypasses the DOM event layer entirely.
+    if (!reordered) {
+      log('Phase 3: Exploring Ember internals...');
+
+      // First, run diagnostics to understand the Ember structure
+      const exploreResult = await CrossclimbDOM.pageEmberExplore();
+      if (exploreResult.ok && exploreResult.data) {
+        const info = exploreResult.data;
+        log(`  Ember: version=${info.emberVersion || 'N/A'} hasRun=${info.hasRun} hasGetOwner=${info.hasGetOwner}`);
+        if (info.namespaces?.length > 0) log(`  Namespaces: ${info.namespaces.join(', ')}`);
+        if (info.applications?.length > 0) log(`  Applications: ${info.applications.map(a => a.name).join(', ')}`);
+        if (info.moduleRegistry?.available) {
+          log(`  Module registry: ${info.moduleRegistry.totalModules} modules`);
+          if (info.moduleRegistry.relevantModules?.length > 0) {
+            log(`  Relevant modules: ${info.moduleRegistry.relevantModules.join(', ')}`);
+          }
+        }
+        log(`  DOM walk: ${info.domWalk?.elementsWithMeta?.length || 0} elements with Ember metadata`);
+        for (const elem of (info.domWalk?.elementsWithMeta || []).slice(0, 8)) {
+          log(`    <${elem.tag}> class="${elem.class?.substring(0, 60)}" source=${elem.source} keys=[${elem.metaKeys.join(',')}]${elem.hasView ? ' HAS_VIEW' : ''}${elem.hasComponent ? ' HAS_COMPONENT' : ''}${elem.containerKey ? ' key=' + elem.containerKey : ''}`);
+          if (elem.metaObjKeys) log(`      metaObj keys: ${elem.metaObjKeys.join(', ')}`);
+        }
+        if (info.dragHandles?.length > 0) {
+          log(`  Drag handles: ${info.dragHandles.length}`);
+          for (const dh of info.dragHandles.slice(0, 3)) {
+            log(`    #${dh.index}: <${dh.tag}> emberKeys=[${dh.emberKeys.join(',')}] attrs=[${dh.attributes.join(', ')}] totalKeys=${dh.totalObjKeys}`);
+          }
+        }
+        log(`  Addon patterns: sortable=${info.addonPatterns?.sortableItems}/${info.addonPatterns?.sortableGroup} emberActions=${info.addonPatterns?.emberActions} ariaGrabbed=${info.addonPatterns?.ariaGrabbed}`);
+        if (info.ownerFound) {
+          log(`  Ember owner FOUND on <${info.ownerElement?.tag}> level=${info.ownerElement?.level} via=${info.ownerElement?.viaPath}`);
+          if (info.lookupResults?.length > 0) {
+            log(`  Lookups: ${info.lookupResults.join(', ')}`);
+          }
+        }
+      }
+
+      // Now try the direct Ember reorder
+      log('  Attempting Ember model reorder...');
+      const emberResult = await CrossclimbDOM.pageEmberReorder(correctMiddleOrder);
+      log(`  Ember reorder: ok=${emberResult.ok} componentFound=${emberResult.componentFound || false} reordered=${emberResult.reordered || false}`);
+      if (emberResult.strategies?.length > 0) {
+        log(`  Strategies: ${emberResult.strategies.join(' | ')}`);
+      }
+      if (emberResult.componentProps?.length > 0) {
+        log(`  Component props: ${emberResult.componentProps.slice(0, 30).join(', ')}`);
+      }
+
+      if (emberResult.reordered) {
+        await CrossclimbDOM.sleep(1000);
+        current = await readOrder();
+        if (isCorrect(current)) {
+          log('  Ember model reorder succeeded!');
+          reordered = true;
+        } else {
+          log('  Ember reorder applied but visual order still wrong');
+        }
+      }
+    }
+
+    // ──── Phase 4: Direct DOM reorder (visual fallback) ────
+    // Last resort: physically move DOM elements. This changes the visual layout
+    // but doesn't update Ember's internal model, so the game may not recognize
+    // the new order. Still useful as it makes the puzzle visually correct.
+    if (!reordered) {
+      current = await readOrder();
+      if (current && !isCorrect(current)) {
+        log('Phase 4: Direct DOM reorder (visual fallback)...');
+        const reorderResult = await CrossclimbDOM.pageReorderDOM(correctMiddleOrder);
+        log(`  DOM reorder: ok=${reorderResult.ok} moved=${reorderResult.reordered || 0}${reorderResult.error ? ' err=' + reorderResult.error : ''}`);
+        await CrossclimbDOM.sleep(1000);
       }
     }
 
@@ -534,6 +671,10 @@ const Solver = {
       log(`Final order: ${finalWords.join(' → ')}`);
       if (JSON.stringify(finalWords) === JSON.stringify(correctMiddleOrder)) {
         log('Reordering successful!');
+        if (!reordered) {
+          log('NOTE: Visual order is correct but the game may not recognize it.');
+          log('The game\'s Ember data model may need updating. Check Ember exploration logs above for clues.');
+        }
       } else {
         log('WARNING: Final order does not match target. Manual reorder may be needed.');
         log(`Expected: ${correctMiddleOrder.join(' → ')}`);

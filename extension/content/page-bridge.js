@@ -60,6 +60,18 @@
           reorderDOM(d.targetWords, result);
           break;
 
+        case 'drag-touch':
+          doTouchDragAsync(d.srcSel, d.tgtSel, result);
+          return; // ack sent async
+
+        case 'ember-explore':
+          emberExplore(result);
+          break;
+
+        case 'ember-reorder':
+          emberReorder(d.targetWords, result);
+          break;
+
         default:
           result.ok = false;
           result.error = 'unknown action: ' + d.action;
@@ -502,6 +514,557 @@
     }
   }
 
+  // ---- TOUCH-EVENT DRAG ----
+  // Touch events are handled differently from pointer events by many sortable libraries.
+  // Ember-sortable and similar addons often have dedicated touch handlers that may not
+  // check event.isTrusted, since touch simulation is less commonly blocked.
+  // The strategy: dispatch touchstart on the drag handle, then a series of touchmove
+  // events tracing a path to the target, and finally touchend at the destination.
+
+  function doTouchDragAsync(srcSel, tgtSel, result) {
+    var srcEl = document.querySelector(srcSel);
+    var tgtEl = document.querySelector(tgtSel);
+    if (!srcEl || !tgtEl) {
+      result.ok = false;
+      result.error = 'touch drag elements not found';
+      window.postMessage(result, '*');
+      return;
+    }
+
+    var sr = srcEl.getBoundingClientRect();
+    var tr = tgtEl.getBoundingClientRect();
+    var sx = sr.left + sr.width / 2, sy = sr.top + sr.height / 2;
+    var ex = tr.left + tr.width / 2, ey = tr.top + tr.height / 2;
+
+    // Touch identifier must be consistent across all events in a single gesture.
+    // radiusX/Y and force mimic a realistic finger touch on a mobile screen.
+    var touchId = Date.now() % 100000;
+
+    function makeTouch(x, y) {
+      return new Touch({
+        identifier: touchId,
+        target: srcEl,
+        clientX: x,
+        clientY: y,
+        pageX: x + window.scrollX,
+        pageY: y + window.scrollY,
+        screenX: x,
+        screenY: y,
+        radiusX: 11.5,
+        radiusY: 11.5,
+        force: 1
+      });
+    }
+
+    // Phase 1: touchstart on the drag handle
+    var startTouch = makeTouch(sx, sy);
+    srcEl.dispatchEvent(new TouchEvent('touchstart', {
+      touches: [startTouch],
+      targetTouches: [startTouch],
+      changedTouches: [startTouch],
+      bubbles: true,
+      cancelable: true
+    }));
+
+    // Phase 2: touchmove in incremental steps with easing
+    var step = 0, steps = 25;
+    function touchStep() {
+      step++;
+      if (step > steps) {
+        // Phase 3: touchend at the target position
+        var endTouch = makeTouch(ex, ey);
+        var endOpts = {
+          touches: [],
+          targetTouches: [],
+          changedTouches: [endTouch],
+          bubbles: true,
+          cancelable: true
+        };
+        srcEl.dispatchEvent(new TouchEvent('touchend', endOpts));
+        // Also on document — many sortable libraries bind touchend there
+        document.dispatchEvent(new TouchEvent('touchend', endOpts));
+        window.postMessage(result, '*');
+        return;
+      }
+
+      var t = step / steps;
+      // Ease in-out cubic for natural finger movement
+      var e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      var cx = sx + (ex - sx) * e;
+      var cy = sy + (ey - sy) * e;
+
+      var moveTouch = makeTouch(cx, cy);
+      var moveOpts = {
+        touches: [moveTouch],
+        targetTouches: [moveTouch],
+        changedTouches: [moveTouch],
+        bubbles: true,
+        cancelable: true
+      };
+
+      // Dispatch on the source element (where the gesture started)
+      srcEl.dispatchEvent(new TouchEvent('touchmove', moveOpts));
+      // Also dispatch on document — libraries like ember-sortable bind touchmove here
+      document.dispatchEvent(new TouchEvent('touchmove', moveOpts));
+
+      // Dispatch on the element currently under the touch point
+      var elAtPoint = document.elementFromPoint(cx, cy);
+      if (elAtPoint && elAtPoint !== srcEl && elAtPoint !== document.documentElement) {
+        elAtPoint.dispatchEvent(new TouchEvent('touchmove', moveOpts));
+      }
+
+      setTimeout(touchStep, 16); // ~60fps
+    }
+
+    // Start moving after 200ms — a realistic delay between finger down and first move,
+    // long enough for most libraries to register the touch as a potential drag gesture.
+    setTimeout(touchStep, 200);
+  }
+
+  // ---- EMBER EXPLORATION ----
+  // Comprehensive diagnostic that inspects the Ember.js framework internals
+  // to understand how the game's sortable list is managed.
+  //
+  // Ember apps store metadata on DOM elements via special properties:
+  //   __ember_meta__       : Core metadata (classic Ember)
+  //   __emberXXXXXXXXXX    : View GUID references (random hex suffix)
+  //   __glimmerXXXXXXXX    : Glimmer VM metadata (Octane/modern Ember)
+  //
+  // Ember also uses AMD modules (requirejs) — we can inspect the module registry
+  // to find sortable/drag-related modules that reveal which addon is used.
+  //
+  // The goal is to find the component managing the sortable list so we can
+  // directly call its reorder action or mutate its backing array.
+
+  function emberExplore(result) {
+    var info = {};
+
+    // --- 1. Global Ember object ---
+    info.hasEmber = typeof Ember !== 'undefined';
+    if (info.hasEmber) {
+      info.emberVersion = typeof Ember.VERSION === 'string' ? Ember.VERSION : 'unknown';
+      info.hasRun = typeof Ember.run === 'function';
+      info.hasGetOwner = typeof Ember.getOwner === 'function';
+
+      // Ember.Namespace.NAMESPACES lists all Ember apps on the page
+      try {
+        info.namespaces = [];
+        var ns = (Ember.Namespace && Ember.Namespace.NAMESPACES) || [];
+        for (var i = 0; i < ns.length; i++) {
+          info.namespaces.push(String(ns[i]));
+        }
+      } catch (e) { info.namespaceError = e.message; }
+
+      // Application instances
+      try {
+        info.applications = [];
+        var apps = (Ember.Application && Ember.Application.NAMESPACES) || [];
+        for (var a = 0; a < apps.length; a++) {
+          info.applications.push({
+            name: String(apps[a]),
+            rootElement: apps[a].rootElement || 'unknown'
+          });
+        }
+      } catch (e) { info.appError = e.message; }
+
+      // View registry (available in Ember <= 3.x, removed in 4.x)
+      try {
+        if (Ember.View && Ember.View.views) {
+          info.viewCount = Object.keys(Ember.View.views).length;
+        }
+      } catch (e) {}
+    }
+
+    // --- 2. AMD module registry (requirejs) ---
+    // Ember CLI apps use AMD modules. Searching the registry reveals which
+    // sortable/drag addon the game uses (ember-sortable, ember-drag-sort, etc.)
+    info.moduleRegistry = { available: false };
+    try {
+      if (typeof requirejs !== 'undefined') {
+        info.moduleRegistry.available = true;
+        var entries = requirejs.entries || requirejs._eak_seen || {};
+        var allModules = Object.keys(entries);
+        info.moduleRegistry.totalModules = allModules.length;
+        info.moduleRegistry.relevantModules = allModules.filter(function(m) {
+          return m.indexOf('sort') >= 0 || m.indexOf('drag') >= 0 ||
+                 m.indexOf('crossclimb') >= 0 || m.indexOf('reorder') >= 0 ||
+                 m.indexOf('games') >= 0;
+        }).slice(0, 40);
+      }
+    } catch (e) { info.moduleRegistry.error = e.message; }
+
+    // --- 3. Walk DOM elements for Ember/Glimmer metadata ---
+    var container = document.querySelector('.crossclimb__guess__container');
+    info.domWalk = { containerFound: !!container, elementsWithMeta: [] };
+
+    if (container) {
+      var searchEls = [];
+
+      // Check ancestors up 10 levels (the component may wrap the container)
+      var anc = container;
+      for (var lvl = 0; lvl < 10 && anc && anc !== document.documentElement; lvl++) {
+        searchEls.push({ el: anc, source: 'ancestor-' + lvl });
+        anc = anc.parentElement;
+      }
+
+      // Check all descendants (rows, handles, inputs, etc.)
+      var childNodes = container.querySelectorAll('*');
+      for (var c = 0; c < Math.min(childNodes.length, 150); c++) {
+        searchEls.push({ el: childNodes[c], source: 'descendant' });
+      }
+
+      for (var s = 0; s < searchEls.length; s++) {
+        var el = searchEls[s].el;
+        var elKeys = Object.keys(el);
+        var metaKeys = [];
+        for (var ki = 0; ki < elKeys.length; ki++) {
+          var key = elKeys[ki];
+          if (key.indexOf('__ember') === 0 || key.indexOf('__glimmer') === 0 ||
+              key.indexOf('_ember') === 0) {
+            metaKeys.push(key);
+          }
+        }
+
+        if (metaKeys.length > 0) {
+          var entry = {
+            tag: el.tagName,
+            class: (el.className || '').toString().substring(0, 100),
+            id: el.id || '',
+            source: searchEls[s].source,
+            metaKeys: metaKeys
+          };
+
+          // Extract what we can from the Ember metadata
+          for (var mk = 0; mk < metaKeys.length; mk++) {
+            try {
+              var metaVal = el[metaKeys[mk]];
+              if (metaVal && typeof metaVal === 'object') {
+                if (metaVal._view) entry.hasView = true;
+                if (metaVal.component) entry.hasComponent = true;
+                if (metaVal.source) entry.metaSource = String(metaVal.source).substring(0, 80);
+                if (metaVal._debugContainerKey) entry.containerKey = metaVal._debugContainerKey;
+                // List the metadata object's own keys for further inspection
+                entry.metaObjKeys = Object.keys(metaVal).slice(0, 20);
+              }
+            } catch (e) {}
+          }
+          info.domWalk.elementsWithMeta.push(entry);
+        }
+      }
+    }
+
+    // --- 4. Inspect drag handle elements specifically ---
+    info.dragHandles = [];
+    var draggers = document.querySelectorAll('.crossclimb__guess-dragger');
+    for (var d = 0; d < draggers.length; d++) {
+      var dragger = draggers[d];
+      var dKeys = Object.keys(dragger);
+      var dEmber = dKeys.filter(function(k) {
+        return k.indexOf('ember') >= 0 || k.indexOf('glimmer') >= 0;
+      });
+      // Collect all HTML attributes (some Ember addons use data-* attributes)
+      var dAttrs = [];
+      for (var ai = 0; ai < dragger.attributes.length; ai++) {
+        dAttrs.push(dragger.attributes[ai].name + '=' + dragger.attributes[ai].value.substring(0, 40));
+      }
+      info.dragHandles.push({
+        index: d,
+        tag: dragger.tagName,
+        emberKeys: dEmber,
+        attributes: dAttrs,
+        parentClass: (dragger.parentElement ? dragger.parentElement.className || '' : '').substring(0, 80),
+        totalObjKeys: dKeys.length
+      });
+    }
+
+    // --- 5. Check for sortable addon patterns ---
+    info.addonPatterns = {};
+    // ember-sortable classes/attributes
+    info.addonPatterns.sortableItems = document.querySelectorAll('.sortable-item, [data-sortable-item]').length;
+    info.addonPatterns.sortableGroup = document.querySelectorAll('.sortable-group, [data-sortable-group]').length;
+    // ember-drag-sort
+    info.addonPatterns.dragSortItems = document.querySelectorAll('[data-drag-sort]').length;
+    // Classic Ember action bindings ({{action}}) add data-ember-action-* attributes
+    info.addonPatterns.emberActions = document.querySelectorAll('[data-ember-action]').length;
+    // ARIA drag attributes
+    info.addonPatterns.ariaGrabbed = document.querySelectorAll('[aria-grabbed]').length;
+    info.addonPatterns.ariaDrop = document.querySelectorAll('[aria-dropeffect]').length;
+
+    // --- 6. Try accessing the Ember owner (DI container) from DOM elements ---
+    // Ember.getOwner() returns the application's dependency injection container
+    // from any Ember object (component, service, etc.). From there we can look up
+    // any registered service or component by name.
+    if (typeof Ember !== 'undefined' && Ember.getOwner && container) {
+      try {
+        var searchEl2 = container;
+        for (var oi = 0; oi < 15 && searchEl2; oi++) {
+          var ownerKeys = Object.keys(searchEl2);
+          for (var ok = 0; ok < ownerKeys.length; ok++) {
+            if (ownerKeys[ok].indexOf('__ember') === 0) {
+              var viewRef = searchEl2[ownerKeys[ok]];
+              if (viewRef) {
+                // Try to get owner from various possible references
+                var targets = [viewRef, viewRef._view, viewRef.component];
+                for (var ti = 0; ti < targets.length; ti++) {
+                  if (targets[ti]) {
+                    try {
+                      var owner = Ember.getOwner(targets[ti]);
+                      if (owner) {
+                        info.ownerFound = true;
+                        info.ownerElement = {
+                          tag: searchEl2.tagName,
+                          class: (searchEl2.className || '').toString().substring(0, 80),
+                          level: oi,
+                          viaPath: ti === 0 ? 'direct' : ti === 1 ? '_view' : 'component'
+                        };
+                        // Try to look up game-related factories
+                        info.lookupResults = [];
+                        var lookupNames = [
+                          'component:crossclimb-grid', 'component:sortable-group',
+                          'component:crossclimb-guess', 'component:drag-sort-list',
+                          'service:game', 'service:crossclimb', 'controller:crossclimb'
+                        ];
+                        for (var ln = 0; ln < lookupNames.length; ln++) {
+                          try {
+                            var found = owner.lookup(lookupNames[ln]);
+                            if (found) {
+                              info.lookupResults.push(lookupNames[ln] + ': FOUND');
+                            }
+                          } catch (e2) {}
+                        }
+                      }
+                    } catch (e3) {}
+                  }
+                }
+              }
+            }
+          }
+          if (info.ownerFound) break;
+          searchEl2 = searchEl2.parentElement;
+        }
+      } catch (e) { info.ownerError = e.message; }
+    }
+
+    result.data = info;
+  }
+
+  // ---- EMBER REORDER ----
+  // Attempts to find and directly manipulate the Ember component's model
+  // to achieve the target row order. This bypasses the DOM entirely and
+  // goes straight to the framework's data layer.
+
+  function emberReorder(targetWords, result) {
+    var container = document.querySelector('.crossclimb__guess__container');
+    if (!container) {
+      result.ok = false;
+      result.error = 'no container';
+      return;
+    }
+
+    result.strategies = [];
+
+    // --- Strategy 1: Find Ember component via DOM element metadata ---
+    // Walk from the container upward through ancestors, checking each element
+    // for __ember* properties that reference an Ember view or component.
+    var component = null;
+    var componentKey = null;
+
+    var searchEl = container;
+    for (var lvl = 0; lvl < 15 && searchEl && searchEl !== document.documentElement; lvl++) {
+      var keys = Object.keys(searchEl);
+      for (var ki = 0; ki < keys.length; ki++) {
+        if (keys[ki].indexOf('__ember') === 0) {
+          var ref = searchEl[keys[ki]];
+          if (ref) {
+            var comp = ref._view || ref.component || ref;
+            // Check if this looks like a component (has properties like 'model', 'items', etc.)
+            if (comp && typeof comp === 'object') {
+              var compKeys = Object.keys(comp);
+              var hasModel = compKeys.some(function(k) {
+                return k === 'model' || k === 'items' || k === 'sortableItems' ||
+                       k === 'content' || k === 'list' || k === 'guesses';
+              });
+              if (hasModel) {
+                component = comp;
+                componentKey = keys[ki] + (ref._view ? '._view' : ref.component ? '.component' : '');
+                result.strategies.push('found-model-component-level-' + lvl);
+                break;
+              }
+              // Even without a model prop, save the first component we find
+              if (!component && compKeys.length > 5) {
+                component = comp;
+                componentKey = keys[ki];
+              }
+            }
+          }
+        }
+      }
+      if (componentKey && component) break;
+      searchEl = searchEl.parentElement;
+    }
+
+    if (component) {
+      result.componentFound = true;
+      result.componentKey = componentKey;
+
+      // List component properties for debugging
+      try {
+        result.componentProps = Object.keys(component).slice(0, 60);
+      } catch (e) {}
+
+      // Try to find and reorder the backing array
+      var arrayProps = ['model', 'items', 'sortableItems', 'content', 'list',
+                        'guesses', 'rows', 'children', 'arrangedContent'];
+      for (var pi = 0; pi < arrayProps.length; pi++) {
+        var propName = arrayProps[pi];
+        try {
+          var propVal = component.get ? component.get(propName) : component[propName];
+          if (!propVal) continue;
+
+          var arr = propVal.toArray ? propVal.toArray() : (Array.isArray(propVal) ? propVal : null);
+          if (!arr || arr.length === 0) continue;
+
+          result.strategies.push('found-array: ' + propName + ' len=' + arr.length);
+
+          // Build word → item mapping
+          var itemMap = {};
+          for (var ii = 0; ii < arr.length; ii++) {
+            var item = arr[ii];
+            var word = '';
+            if (typeof item === 'string') {
+              word = item.toUpperCase();
+            } else if (item.get) {
+              word = (item.get('word') || item.get('answer') || item.get('text') || item.get('value') || '').toUpperCase();
+            } else {
+              word = (item.word || item.answer || item.text || item.value || '').toUpperCase();
+            }
+            if (word) itemMap[word] = item;
+          }
+
+          // Reorder the array
+          var newOrder = [];
+          for (var ti = 0; ti < targetWords.length; ti++) {
+            if (itemMap[targetWords[ti]]) {
+              newOrder.push(itemMap[targetWords[ti]]);
+            }
+          }
+
+          if (newOrder.length === arr.length) {
+            // Apply via Ember's MutableArray.replace() if available (triggers observers)
+            if (propVal.replace && typeof propVal.replace === 'function') {
+              propVal.replace(0, propVal.length, newOrder);
+              result.strategies.push('reordered-via-mutablearray-replace');
+              result.reordered = true;
+            } else if (component.set) {
+              component.set(propName, newOrder);
+              result.strategies.push('reordered-via-component-set');
+              result.reordered = true;
+            }
+            break;
+          } else {
+            result.strategies.push('word-match: ' + newOrder.length + '/' + arr.length);
+          }
+        } catch (e) {
+          result.strategies.push('array-error-' + propName + ': ' + e.message);
+        }
+      }
+
+      // Try calling known action names
+      var actionNames = ['reorderItems', 'onReorder', 'updateSort', 'sortEndAction',
+                         'onChange', '_updateItems', 'update', 'onSortEnd'];
+      for (var ai = 0; ai < actionNames.length; ai++) {
+        try {
+          var action = component.get ? component.get(actionNames[ai]) : component[actionNames[ai]];
+          if (typeof action === 'function') {
+            result.strategies.push('found-action: ' + actionNames[ai]);
+          }
+        } catch (e) {}
+      }
+    } else {
+      result.componentFound = false;
+      result.strategies.push('no-component-found-in-dom-walk');
+    }
+
+    // --- Strategy 2: Use requirejs to load and inspect sortable modules ---
+    if (typeof requirejs !== 'undefined') {
+      try {
+        var entries = requirejs.entries || {};
+        var sortModules = Object.keys(entries).filter(function(m) {
+          return m.indexOf('sort') >= 0 || m.indexOf('drag') >= 0;
+        });
+        if (sortModules.length > 0) {
+          result.strategies.push('requirejs-modules: ' + sortModules.slice(0, 10).join(', '));
+        }
+      } catch (e) {}
+    }
+
+    // --- Strategy 3: DOM reorder + Ember notification ---
+    // If we couldn't find the component's model, fall back to DOM reorder
+    // and try to trigger Ember's change detection via property notifications.
+    if (!result.reordered) {
+      try {
+        var middleRows = container.querySelectorAll('.crossclimb__guess--middle');
+        var rowArr = Array.prototype.slice.call(middleRows);
+        rowArr.sort(function(a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+
+        var wordMap = {};
+        for (var wi = 0; wi < rowArr.length; wi++) {
+          var inputs = rowArr[wi].querySelectorAll('.crossclimb__guess_box input');
+          var w = '';
+          for (var ij = 0; ij < inputs.length; ij++) w += (inputs[ij].value || '').toUpperCase();
+          wordMap[w] = rowArr[wi];
+        }
+
+        var moved = 0;
+        for (var mi = 0; mi < targetWords.length; mi++) {
+          var targetEl = wordMap[targetWords[mi]];
+          if (!targetEl) continue;
+          var currentRows = Array.prototype.slice.call(container.querySelectorAll('.crossclimb__guess--middle'));
+          currentRows.sort(function(a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+          if (mi < currentRows.length && currentRows[mi] !== targetEl) {
+            container.insertBefore(targetEl, currentRows[mi]);
+            moved++;
+          }
+        }
+        result.domMoved = moved;
+
+        // Try Ember.run + notifyPropertyChange to trigger observers
+        if (typeof Ember !== 'undefined' && Ember.run) {
+          Ember.run(function() {
+            try {
+              if (Ember.notifyPropertyChange) {
+                // Walk elements looking for something to notify
+                var notifyTargets = [container, container.parentElement];
+                for (var nt = 0; nt < notifyTargets.length; nt++) {
+                  if (!notifyTargets[nt]) continue;
+                  var ntKeys = Object.keys(notifyTargets[nt]);
+                  for (var nk = 0; nk < ntKeys.length; nk++) {
+                    if (ntKeys[nk].indexOf('__ember') === 0) {
+                      var obj = notifyTargets[nt][ntKeys[nk]];
+                      var notifyTarget = obj && (obj._view || obj.component || obj);
+                      if (notifyTarget) {
+                        Ember.notifyPropertyChange(notifyTarget, 'model');
+                        Ember.notifyPropertyChange(notifyTarget, 'items');
+                        Ember.notifyPropertyChange(notifyTarget, 'arrangedContent');
+                        result.strategies.push('notified-property-change');
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (e) {
+              result.strategies.push('notify-error: ' + e.message);
+            }
+          });
+        }
+
+        result.strategies.push('dom-reorder-fallback: moved=' + moved);
+      } catch (e) {
+        result.strategies.push('dom-reorder-error: ' + e.message);
+      }
+    }
+  }
+
   // ---- READ BOARD ORDER ----
   // Reads the current row order by visual position (y-coordinate), NOT DOM order.
   // The game may reorder rows visually via CSS transforms without moving DOM elements,
@@ -568,5 +1131,5 @@
     return Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top);
   }
 
-  console.log('[CrossclimbSolver] Page bridge v2 ready');
+  console.log('[CrossclimbSolver] Page bridge v3 ready (touch drag + Ember exploration)');
 })();
