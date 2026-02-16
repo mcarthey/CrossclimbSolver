@@ -706,7 +706,8 @@ const Solver = {
       current = await readOrder();
       if (current && !isCorrect(current)) {
         const deepResult = await CrossclimbDOM.pageEmberDeepReorder(correctMiddleOrder);
-        log(`  Deep reorder: ok=${deepResult.ok} ownerFound=${deepResult.ownerFound || false} reordered=${deepResult.reordered || false}`);
+        const reorderMethod = deepResult.reorderMethod || (deepResult.reordered ? 'unknown' : 'none');
+        log(`  Deep reorder: ok=${deepResult.ok} ownerFound=${deepResult.ownerFound || false} reordered=${deepResult.reordered || false} method=${reorderMethod}`);
 
         // Log strategies tried
         if (deepResult.strategies?.length > 0) {
@@ -731,6 +732,7 @@ const Solver = {
             if (info.found) {
               log(`  Lookup ${name}: FOUND [${info.keys?.slice(0, 15).join(', ')}]`);
               if (info.sortCompKeys) log(`    sortComponent: [${info.sortCompKeys.slice(0, 15).join(', ')}]`);
+              if (info.groupEntryCount !== undefined) log(`    groupEntries: ${info.groupEntryCount}`);
             } else if (info.error) {
               log(`  Lookup ${name}: error=${info.error}`);
             }
@@ -765,10 +767,20 @@ const Solver = {
           await CrossclimbDOM.sleep(1000);
           current = await readOrder();
           if (isCorrect(current)) {
-            log('  Ember deep reorder succeeded!');
-            reordered = true;
+            if (reorderMethod === 'ember-model') {
+              log('  Ember model reorder succeeded!');
+              reordered = true;
+            } else if (reorderMethod === 'dom') {
+              log('  DOM reorder succeeded visually but Ember model NOT updated');
+              log('  WARNING: Game may not recognize the reorder. Endpoint rows may not unlock.');
+              // Still mark as "reordered" so we don't retry, but the model may be stale
+              reordered = true;
+            } else {
+              log('  Reorder succeeded (method: ' + reorderMethod + ')');
+              reordered = true;
+            }
           } else {
-            log('  Ember reorder applied but visual order still wrong');
+            log('  Reorder applied but visual order still wrong');
           }
         }
       }

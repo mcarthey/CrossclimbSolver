@@ -1726,8 +1726,93 @@
               result.strategies.push('sortable-state-has-groups');
               try {
                 var groups = svc.groups;
-                result.lookups[lookupNames[ln]].groupCount = groups.length || Object.keys(groups).length;
-              } catch (e) {}
+                var groupCount = 0;
+                try { groupCount = groups.size || groups.length || Object.keys(groups).length; } catch (e2) {}
+                result.lookups[lookupNames[ln]].groupCount = groupCount;
+
+                // Deep explore groups to find sortable items
+                var groupEntries = [];
+                if (typeof groups.forEach === 'function') {
+                  groups.forEach(function(value, key) { groupEntries.push({key: key, value: value}); });
+                } else if (Array.isArray(groups)) {
+                  for (var gi = 0; gi < groups.length; gi++) groupEntries.push({key: gi, value: groups[gi]});
+                } else if (typeof groups === 'object') {
+                  var gks = Object.keys(groups);
+                  for (var gki = 0; gki < gks.length; gki++) groupEntries.push({key: gks[gki], value: groups[gks[gki]]});
+                }
+                result.lookups[lookupNames[ln]].groupEntryCount = groupEntries.length;
+
+                for (var ge = 0; ge < groupEntries.length && !result.reordered; ge++) {
+                  var group = groupEntries[ge].value;
+                  if (!group) continue;
+                  var gGroupKeys = [];
+                  try { gGroupKeys = Object.keys(group).slice(0, 40); } catch (e3) {}
+                  result.strategies.push('group-' + ge + '-keys=[' + gGroupKeys.slice(0, 15).join(',') + ']');
+
+                  // Try various property names for sortable items
+                  var gItemNames = ['items', 'model', '_items', 'sortedItems', 'sortableItems', 'sortableObjectList'];
+                  for (var gin = 0; gin < gItemNames.length && !result.reordered; gin++) {
+                    var gProp = gItemNames[gin];
+                    var gItems = group[gProp];
+                    if (!gItems) { try { if (group.get) gItems = group.get(gProp); } catch (e4) {} }
+                    if (!gItems) continue;
+
+                    var gArr = gItems.toArray ? gItems.toArray() : (Array.isArray(gItems) ? gItems : null);
+                    if (!gArr || gArr.length !== targetWords.length) continue;
+
+                    result.strategies.push('group-items-via-' + gProp + '-len=' + gArr.length);
+
+                    // Build word map from group items
+                    var gWordMap = {};
+                    for (var gii = 0; gii < gArr.length; gii++) {
+                      var gIt = gArr[gii];
+                      var gW = '';
+                      if (typeof gIt === 'string') gW = gIt.toUpperCase();
+                      else {
+                        if (gIt.get) gW = (gIt.get('word') || gIt.get('answer') || gIt.get('text') || '').toUpperCase();
+                        if (!gW) gW = (gIt.word || gIt.answer || gIt.text || '').toUpperCase();
+                        if (!gW && gIt.model) {
+                          var gM = gIt.model;
+                          if (typeof gM === 'string') gW = gM.toUpperCase();
+                          else if (gM.get) gW = (gM.get('word') || gM.get('answer') || gM.get('text') || '').toUpperCase();
+                          else gW = (gM.word || gM.answer || gM.text || '').toUpperCase();
+                        }
+                      }
+                      if (gW) gWordMap[gW] = gIt;
+                      result.strategies.push('groupItem-' + gii + ': ' + gW);
+                    }
+
+                    var gNewOrder = [];
+                    for (var gtw = 0; gtw < targetWords.length; gtw++) {
+                      if (gWordMap[targetWords[gtw]]) gNewOrder.push(gWordMap[targetWords[gtw]]);
+                    }
+
+                    if (gNewOrder.length === gArr.length) {
+                      try {
+                        if (emberRun) {
+                          emberRun(function() {
+                            if (gItems.replace) {
+                              gItems.replace(0, gItems.length || gItems.get('length'), gNewOrder);
+                              result.strategies.push('reordered-via-group-' + gProp);
+                              result.reordered = true;
+                              result.reorderMethod = 'ember-model';
+                            } else if (emberSet && group) {
+                              emberSet(group, gProp, gNewOrder);
+                              result.strategies.push('reordered-via-set-group-' + gProp);
+                              result.reordered = true;
+                              result.reorderMethod = 'ember-model';
+                            }
+                          });
+                        }
+                      } catch (e5) {
+                        result.strategies.push('group-reorder-error: ' + e5.message);
+                      }
+                    }
+                  }
+                }
+              } catch (e) {
+                result.strategies.push('groups-explore-error: ' + e.message);
+              }
             }
 
             // If it's drag-coordinator, look for sortable component
@@ -1784,6 +1869,99 @@
                   result.strategies.push('sortComp-error: ' + e.message);
                 }
               }
+
+              // Also check sortComponents (plural) - used in newer ember-sortable v3+/v4
+              if (!result.reordered && svc.sortComponents) {
+                result.strategies.push('drag-coord-has-sortComponents');
+                try {
+                  var sortComps = svc.sortComponents;
+                  var compList = [];
+                  if (typeof sortComps.forEach === 'function') {
+                    sortComps.forEach(function(comp) { compList.push(comp); });
+                  } else if (Array.isArray(sortComps)) {
+                    compList = sortComps;
+                  } else if (typeof sortComps === 'object') {
+                    compList = Object.values(sortComps);
+                  }
+                  result.strategies.push('sortComponents-count=' + compList.length);
+
+                  for (var sci = 0; sci < compList.length && !result.reordered; sci++) {
+                    var sc = compList[sci];
+                    if (!sc) continue;
+                    var scKeys = [];
+                    try { scKeys = Object.keys(sc).slice(0, 40); } catch (e2) {}
+                    result.strategies.push('sortComp-' + sci + '-keys=[' + scKeys.slice(0, 15).join(',') + ']');
+
+                    // Try various property names for the item list
+                    var scItemNames = ['items', 'model', '_items', 'sortedItems', 'sortableObjectList',
+                                       'children', '_sortableItems', 'group'];
+                    for (var siln = 0; siln < scItemNames.length && !result.reordered; siln++) {
+                      var scProp = scItemNames[siln];
+                      var scItemList = sc[scProp];
+                      if (!scItemList) { try { if (sc.get) scItemList = sc.get(scProp); } catch (e3) {} }
+                      if (!scItemList) continue;
+
+                      var scItems = scItemList.toArray ? scItemList.toArray() :
+                                    (Array.isArray(scItemList) ? scItemList : null);
+                      if (!scItems || scItems.length !== targetWords.length) {
+                        if (scItems) result.strategies.push('sortComp-' + sci + '-' + scProp + '-len=' + scItems.length + '-skip');
+                        continue;
+                      }
+
+                      result.strategies.push('sortComp-items-via-' + scProp + '-len=' + scItems.length);
+
+                      // Build word map from items
+                      var scWordMap = {};
+                      for (var scii = 0; scii < scItems.length; scii++) {
+                        var scIt = scItems[scii];
+                        var scW = '';
+                        if (typeof scIt === 'string') scW = scIt.toUpperCase();
+                        else {
+                          if (scIt.get) scW = (scIt.get('word') || scIt.get('answer') || scIt.get('text') || '').toUpperCase();
+                          if (!scW) scW = (scIt.word || scIt.answer || scIt.text || '').toUpperCase();
+                          if (!scW && scIt.model) {
+                            var scM = scIt.model;
+                            if (typeof scM === 'string') scW = scM.toUpperCase();
+                            else if (scM.get) scW = (scM.get('word') || scM.get('answer') || scM.get('text') || '').toUpperCase();
+                            else scW = (scM.word || scM.answer || scM.text || '').toUpperCase();
+                          }
+                        }
+                        if (scW) scWordMap[scW] = scIt;
+                        result.strategies.push('sortCompItem-' + scii + ': ' + scW);
+                      }
+
+                      var scNewOrder = [];
+                      for (var sctw = 0; sctw < targetWords.length; sctw++) {
+                        if (scWordMap[targetWords[sctw]]) scNewOrder.push(scWordMap[targetWords[sctw]]);
+                      }
+
+                      if (scNewOrder.length === scItems.length) {
+                        try {
+                          if (emberRun) {
+                            emberRun(function() {
+                              if (scItemList.replace) {
+                                scItemList.replace(0, scItemList.length || scItemList.get('length'), scNewOrder);
+                                result.strategies.push('reordered-via-sortComponents-' + scProp);
+                                result.reordered = true;
+                                result.reorderMethod = 'ember-model';
+                              } else if (emberSet && sc) {
+                                emberSet(sc, scProp, scNewOrder);
+                                result.strategies.push('reordered-via-set-sortComponents-' + scProp);
+                                result.reordered = true;
+                                result.reorderMethod = 'ember-model';
+                              }
+                            });
+                          }
+                        } catch (e4) {
+                          result.strategies.push('sortComponents-reorder-error: ' + e4.message);
+                        }
+                      }
+                    }
+                  }
+                } catch (e) {
+                  result.strategies.push('sortComponents-error: ' + e.message);
+                }
+              }
             }
           } else {
             result.lookups[lookupNames[ln]] = { found: false };
@@ -1794,6 +1972,188 @@
       }
     } else {
       result.ownerFound = false;
+    }
+
+    // === A5: Find live crossclimb component via Ember view tree / DOM metadata ===
+    if (!result.reordered) {
+      try {
+        var emberMod2 = null;
+        var Ember2 = null;
+        try { emberMod2 = requirejs('ember'); Ember2 = emberMod2.default || emberMod2; } catch (e) {}
+
+        // Strategy F1: Search _viewRegistry for components with gameState
+        if (Ember2 && Ember2._viewRegistry) {
+          var viewIds2 = Object.keys(Ember2._viewRegistry);
+          result.strategies.push('viewRegistry-search-count=' + viewIds2.length);
+          for (var vr2 = 0; vr2 < viewIds2.length && !result.reordered; vr2++) {
+            var view2 = Ember2._viewRegistry[viewIds2[vr2]];
+            if (!view2) continue;
+            // Check if this component has gameState (crossclimb component)
+            var gsRef = null;
+            if (view2.gameState) gsRef = view2.gameState;
+            else if (view2.get) { try { gsRef = view2.get('gameState'); } catch (e2) {} }
+            if (!gsRef) continue;
+
+            result.strategies.push('found-component-with-gameState-via-viewRegistry');
+            var gsKeys2 = [];
+            try { gsKeys2 = Object.keys(gsRef).slice(0, 40); } catch (e3) {}
+            result.strategies.push('gameState-keys=[' + gsKeys2.slice(0, 20).join(',') + ']');
+
+            // Look for cards/rows/items in gameState
+            var cardPropNames = ['cards', 'rows', 'items', 'guesses', 'rungs', 'middleCards',
+                                 'sortableCards', 'cardList', '_cards', 'currentCards'];
+            for (var cpn = 0; cpn < cardPropNames.length && !result.reordered; cpn++) {
+              var cardProp = cardPropNames[cpn];
+              var cards = gsRef[cardProp];
+              if (!cards) { try { if (gsRef.get) cards = gsRef.get(cardProp); } catch (e4) {} }
+              if (!cards) continue;
+
+              var cardArr = cards.toArray ? cards.toArray() : (Array.isArray(cards) ? cards : null);
+              if (!cardArr) continue;
+
+              result.strategies.push('gameState-' + cardProp + '-len=' + cardArr.length);
+
+              if (cardArr.length === targetWords.length) {
+                // Build word map from cards
+                var cardWordMap = {};
+                for (var cdi = 0; cdi < cardArr.length; cdi++) {
+                  var card = cardArr[cdi];
+                  var cw = '';
+                  if (typeof card === 'string') cw = card.toUpperCase();
+                  else {
+                    if (card.get) cw = (card.get('word') || card.get('answer') || card.get('text') || card.get('value') || '').toUpperCase();
+                    if (!cw) cw = (card.word || card.answer || card.text || card.value || '').toUpperCase();
+                  }
+                  if (cw) cardWordMap[cw] = card;
+                  result.strategies.push('card-' + cdi + ': ' + cw);
+                }
+
+                var cardNewOrder = [];
+                for (var ctw2 = 0; ctw2 < targetWords.length; ctw2++) {
+                  if (cardWordMap[targetWords[ctw2]]) cardNewOrder.push(cardWordMap[targetWords[ctw2]]);
+                }
+
+                if (cardNewOrder.length === cardArr.length) {
+                  try {
+                    if (emberRun) {
+                      emberRun(function() {
+                        if (cards.replace) {
+                          cards.replace(0, cards.length || cards.get('length'), cardNewOrder);
+                          result.strategies.push('reordered-via-gameState-' + cardProp);
+                          result.reordered = true;
+                          result.reorderMethod = 'ember-model';
+                        } else if (emberSet) {
+                          emberSet(gsRef, cardProp, cardNewOrder);
+                          result.strategies.push('reordered-via-set-gameState-' + cardProp);
+                          result.reordered = true;
+                          result.reorderMethod = 'ember-model';
+                        }
+                      });
+                    }
+                  } catch (e5) {
+                    result.strategies.push('gameState-reorder-error: ' + e5.message);
+                  }
+                }
+              }
+            }
+
+            // Also check if the component itself has an actions hash with reorder
+            if (!result.reordered && view2.actions) {
+              var actionKeys = Object.keys(view2.actions).slice(0, 20);
+              result.strategies.push('component-actions=[' + actionKeys.join(',') + ']');
+            }
+          }
+        }
+
+        // Strategy F2: Walk game DOM elements with __ember* / __glimmer* metadata
+        if (!result.reordered) {
+          var gameEls = document.querySelectorAll(
+            '.crossclimb__wrapper, .crossclimb__grid, .crossclimb__guess__container, ' +
+            '.play__game__wrapper, .pr-game-web__main-container'
+          );
+          result.strategies.push('dom-walk-candidates=' + gameEls.length);
+          for (var gei = 0; gei < gameEls.length && !result.reordered; gei++) {
+            var el2 = gameEls[gei];
+            // Walk up to find component instance
+            var walkDepth = 0;
+            while (el2 && el2 !== document.body && !result.reordered && walkDepth < 15) {
+              walkDepth++;
+              var elKeys2 = Object.keys(el2).filter(function(k) {
+                return k.indexOf('__ember') === 0 || k.indexOf('__glimmer') === 0;
+              });
+              for (var elk2 = 0; elk2 < elKeys2.length && !result.reordered; elk2++) {
+                var ref3 = el2[elKeys2[elk2]];
+                if (!ref3) continue;
+                var paths4 = [ref3, ref3._view, ref3.component, ref3.args];
+                for (var p4 = 0; p4 < paths4.length && !result.reordered; p4++) {
+                  var candidate2 = paths4[p4];
+                  if (!candidate2 || !candidate2.gameState) continue;
+                  result.strategies.push('found-gameState-via-dom-walk-depth=' + walkDepth);
+                  var gs3 = candidate2.gameState;
+                  var gs3Keys = [];
+                  try { gs3Keys = Object.keys(gs3).slice(0, 40); } catch (e6) {}
+                  result.strategies.push('dom-gameState-keys=[' + gs3Keys.slice(0, 20).join(',') + ']');
+
+                  // Same card reorder logic
+                  var cardPropNames2 = ['cards', 'rows', 'items', 'guesses', 'rungs', 'middleCards',
+                                        'sortableCards', 'cardList', '_cards', 'currentCards'];
+                  for (var cpn2 = 0; cpn2 < cardPropNames2.length && !result.reordered; cpn2++) {
+                    var cp2 = cardPropNames2[cpn2];
+                    var cards2 = gs3[cp2];
+                    if (!cards2) { try { if (gs3.get) cards2 = gs3.get(cp2); } catch (e7) {} }
+                    if (!cards2) continue;
+
+                    var cardArr2 = cards2.toArray ? cards2.toArray() : (Array.isArray(cards2) ? cards2 : null);
+                    if (!cardArr2 || cardArr2.length !== targetWords.length) continue;
+
+                    result.strategies.push('dom-gameState-' + cp2 + '-len=' + cardArr2.length);
+                    var cardWM2 = {};
+                    for (var cd2 = 0; cd2 < cardArr2.length; cd2++) {
+                      var c2 = cardArr2[cd2];
+                      var cw2 = '';
+                      if (typeof c2 === 'string') cw2 = c2.toUpperCase();
+                      else {
+                        if (c2.get) cw2 = (c2.get('word') || c2.get('answer') || c2.get('text') || c2.get('value') || '').toUpperCase();
+                        if (!cw2) cw2 = (c2.word || c2.answer || c2.text || c2.value || '').toUpperCase();
+                      }
+                      if (cw2) cardWM2[cw2] = c2;
+                    }
+
+                    var cNewOrd2 = [];
+                    for (var ct2 = 0; ct2 < targetWords.length; ct2++) {
+                      if (cardWM2[targetWords[ct2]]) cNewOrd2.push(cardWM2[targetWords[ct2]]);
+                    }
+                    if (cNewOrd2.length === cardArr2.length) {
+                      try {
+                        if (emberRun) {
+                          emberRun(function() {
+                            if (cards2.replace) {
+                              cards2.replace(0, cards2.length || cards2.get('length'), cNewOrd2);
+                              result.strategies.push('reordered-via-dom-gameState-' + cp2);
+                              result.reordered = true;
+                              result.reorderMethod = 'ember-model';
+                            } else if (emberSet) {
+                              emberSet(gs3, cp2, cNewOrd2);
+                              result.strategies.push('reordered-via-set-dom-gameState-' + cp2);
+                              result.reordered = true;
+                              result.reorderMethod = 'ember-model';
+                            }
+                          });
+                        }
+                      } catch (e8) {
+                        result.strategies.push('dom-gameState-reorder-error: ' + e8.message);
+                      }
+                    }
+                  }
+                }
+              }
+              el2 = el2.parentElement;
+            }
+          }
+        }
+      } catch (e) {
+        result.strategies.push('view-tree-error: ' + e.message);
+      }
     }
 
     // === B: Inspect game-state module ===
@@ -1875,10 +2235,11 @@
     if (!result.reordered) {
       result.strategies.push('dom-reorder-fallback');
       reorderDOM(targetWords, result);
+      result.reorderMethod = 'dom';
     }
 
     window.postMessage(result, '*');
   }
 
-  console.log('[CrossclimbSolver] Page bridge v5 ready (deep Ember reorder)');
+  console.log('[CrossclimbSolver] Page bridge v6 ready (deep Ember reorder + sortComponents/groups/gameState)');
 })();
