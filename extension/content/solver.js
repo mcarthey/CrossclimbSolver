@@ -696,112 +696,81 @@ const Solver = {
       }
     }
 
-    // ──── Phase 3: Ember exploration v2 + direct model reorder ────
-    // Deep inspection of Ember internals: loads AMD modules, inspects the
-    // drag-coordinator service, sortable-objects component, and Ember utilities.
+    // ──── Phase 3: Deep Ember reorder ────
+    // Comprehensive approach: loads Ember via requirejs to access internal registries
+    // (NAMESPACES, _viewRegistry), searches ALL DOM elements globally for __ember*
+    // metadata, loads game-state/crossclimb modules, and attempts to find the Ember
+    // owner to look up services and reorder the model. Falls back to DOM reorder.
     if (!reordered) {
-      log('Phase 3: Exploring Ember internals (v2)...');
-
-      const exploreResult = await CrossclimbDOM.pageEmberExploreV2();
-      if (exploreResult.ok && exploreResult.data) {
-        const info = exploreResult.data;
-
-        // Log crossclimb-specific modules
-        if (info.modules?.crossclimb?.length > 0) {
-          log(`  Crossclimb modules: ${info.modules.crossclimb.join(', ')}`);
-        }
-        if (info.modules?.sortable?.length > 0) {
-          log(`  Sortable modules: ${info.modules.sortable.join(', ')}`);
-        }
-        if (info.modules?.dragDrop?.length > 0) {
-          log(`  ember-drag-drop modules: ${info.modules.dragDrop.join(', ')}`);
-        }
-        if (info.modules?.playRoutes?.length > 0) {
-          log(`  Play routes: ${info.modules.playRoutes.slice(0, 10).join(', ')}`);
-        }
-
-        // Log drag-coordinator service info
-        if (info.dragCoordinator?.loaded) {
-          log(`  drag-coordinator: loaded`);
-          if (info.dragCoordinator.protoKeys?.length > 0)
-            log(`    proto: ${info.dragCoordinator.protoKeys.join(', ')}`);
-          if (info.dragCoordinator.mixinProps?.length > 0)
-            log(`    mixins: ${info.dragCoordinator.mixinProps.join(', ')}`);
-        } else if (info.dragCoordinator?.error) {
-          log(`  drag-coordinator: ${info.dragCoordinator.error}`);
-        }
-
-        // Log sortable-objects component info
-        if (info.sortableObjects?.loaded) {
-          log(`  sortable-objects: loaded`);
-          if (info.sortableObjects.protoKeys?.length > 0)
-            log(`    proto: ${info.sortableObjects.protoKeys.join(', ')}`);
-          if (info.sortableObjects.mixinProps?.length > 0)
-            log(`    mixins: ${info.sortableObjects.mixinProps.join(', ')}`);
-        } else if (info.sortableObjects?.error) {
-          log(`  sortable-objects: ${info.sortableObjects.error}`);
-        }
-
-        // Log Ember utilities availability
-        for (const [modName, modInfo] of Object.entries(info.emberUtils || {})) {
-          if (modInfo.loaded) {
-            log(`  ${modName}: loaded [${modInfo.hasFns?.join(', ')}]`);
-          } else {
-            log(`  ${modName}: ${modInfo.error || 'not available'}`);
-          }
-        }
-
-        // Log app search results
-        if (info.appSearch?.foundApp) {
-          log(`  App found: ${info.appSearch.foundApp}`);
-        }
-        if (info.appSearch?.appModules?.length > 0) {
-          log(`  App modules: ${info.appSearch.appModules.slice(0, 10).join(', ')}`);
-        }
-
-        // Log sortable item info
-        if (info.sortableItems?.length > 0) {
-          log(`  .sortable-item elements: ${info.sortableItems.length}`);
-          for (const si of info.sortableItems.slice(0, 3)) {
-            log(`    <${si.tag}> draggable=${si.draggable} objKeys=${si.objKeyCount} emberKeys=[${si.emberKeys.join(',')}] attrs=[${si.attrs.slice(0, 5).join(', ')}]`);
-          }
-        }
-      }
-
-      // Try the Ember model reorder
-      log('  Attempting Ember model reorder...');
-      const emberResult = await CrossclimbDOM.pageEmberReorder(correctMiddleOrder);
-      log(`  Ember reorder: ok=${emberResult.ok} componentFound=${emberResult.componentFound || false} reordered=${emberResult.reordered || false}`);
-      if (emberResult.strategies?.length > 0) {
-        log(`  Strategies: ${emberResult.strategies.join(' | ')}`);
-      }
-      if (emberResult.componentProps?.length > 0) {
-        log(`  Component props: ${emberResult.componentProps.slice(0, 30).join(', ')}`);
-      }
-
-      if (emberResult.reordered) {
-        await CrossclimbDOM.sleep(1000);
-        current = await readOrder();
-        if (isCorrect(current)) {
-          log('  Ember model reorder succeeded!');
-          reordered = true;
-        } else {
-          log('  Ember reorder applied but visual order still wrong');
-        }
-      }
-    }
-
-    // ──── Phase 4: Direct DOM reorder (visual fallback) ────
-    // Last resort: physically move DOM elements. This changes the visual layout
-    // but doesn't update Ember's internal model, so the game may not recognize
-    // the new order. Still useful as it makes the puzzle visually correct.
-    if (!reordered) {
+      log('Phase 3: Deep Ember reorder...');
       current = await readOrder();
       if (current && !isCorrect(current)) {
-        log('Phase 4: Direct DOM reorder (visual fallback)...');
-        const reorderResult = await CrossclimbDOM.pageReorderDOM(correctMiddleOrder);
-        log(`  DOM reorder: ok=${reorderResult.ok} moved=${reorderResult.reordered || 0}${reorderResult.error ? ' err=' + reorderResult.error : ''}`);
-        await CrossclimbDOM.sleep(1000);
+        const deepResult = await CrossclimbDOM.pageEmberDeepReorder(correctMiddleOrder);
+        log(`  Deep reorder: ok=${deepResult.ok} ownerFound=${deepResult.ownerFound || false} reordered=${deepResult.reordered || false}`);
+
+        // Log strategies tried
+        if (deepResult.strategies?.length > 0) {
+          for (const s of deepResult.strategies) {
+            log(`  Strategy: ${s}`);
+          }
+        }
+
+        // Log diagnostics
+        const diag = deepResult.diag || {};
+        if (diag.emberVersion) log(`  Ember version: ${diag.emberVersion}`);
+        if (diag.namespaceCount !== undefined) log(`  Namespaces: ${diag.namespaceCount}`);
+        if (diag.viewRegistryCount !== undefined) log(`  View registry entries: ${diag.viewRegistryCount}`);
+        if (diag.globalEmberViews !== undefined) log(`  Global .ember-view elements: ${diag.globalEmberViews}`);
+        if (diag.viewsWithMeta !== undefined) log(`  Views with __ember metadata: ${diag.viewsWithMeta}`);
+        if (diag.candidateElements !== undefined) log(`  Candidate elements searched: ${diag.candidateElements} (with meta: ${diag.candidatesWithMeta || 0})`);
+        if (diag.appClassKeys?.length > 0) log(`  App class keys: ${diag.appClassKeys.join(', ')}`);
+
+        // Log lookups
+        if (deepResult.lookups) {
+          for (const [name, info] of Object.entries(deepResult.lookups)) {
+            if (info.found) {
+              log(`  Lookup ${name}: FOUND [${info.keys?.slice(0, 15).join(', ')}]`);
+              if (info.sortCompKeys) log(`    sortComponent: [${info.sortCompKeys.slice(0, 15).join(', ')}]`);
+            } else if (info.error) {
+              log(`  Lookup ${name}: error=${info.error}`);
+            }
+          }
+        }
+
+        // Log game-state module info
+        if (diag.gameState) {
+          const gs = diag.gameState;
+          log(`  game-state module: defaultType=${gs.defaultType} keys=[${gs.keys?.join(', ')}]`);
+          if (gs.protoKeys?.length > 0) log(`    proto: [${gs.protoKeys.join(', ')}]`);
+          if (gs.objectKeys?.length > 0) log(`    object: [${gs.objectKeys.join(', ')}]`);
+          if (gs.namedExports) log(`    exports: ${JSON.stringify(gs.namedExports)}`);
+        }
+        if (diag.gameStateError) log(`  game-state error: ${diag.gameStateError}`);
+
+        // Log crossclimb component info
+        if (diag.crossclimbComp) {
+          log(`  crossclimb component: defaultType=${diag.crossclimbComp.defaultType}`);
+          if (diag.crossclimbComp.protoKeys?.length > 0) log(`    proto: [${diag.crossclimbComp.protoKeys.join(', ')}]`);
+        }
+        if (diag.guessComp) {
+          log(`  guess component: defaultType=${diag.guessComp.defaultType}`);
+          if (diag.guessComp.protoKeys?.length > 0) log(`    proto: [${diag.guessComp.protoKeys.join(', ')}]`);
+        }
+        if (diag.sortableGroup) {
+          log(`  sortable-group modifier: defaultType=${diag.sortableGroup.defaultType}`);
+          if (diag.sortableGroup.protoKeys?.length > 0) log(`    proto: [${diag.sortableGroup.protoKeys.join(', ')}]`);
+        }
+
+        if (deepResult.reordered) {
+          await CrossclimbDOM.sleep(1000);
+          current = await readOrder();
+          if (isCorrect(current)) {
+            log('  Ember deep reorder succeeded!');
+            reordered = true;
+          } else {
+            log('  Ember reorder applied but visual order still wrong');
+          }
+        }
       }
     }
 

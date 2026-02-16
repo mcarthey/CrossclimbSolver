@@ -9,7 +9,7 @@
   'use strict';
 
   const LOG_PREFIX = '[CrossclimbSolver]';
-  const VERSION = '2.0.4';
+  const VERSION = '2.0.5';
 
   // State
   let puzzleData = null;

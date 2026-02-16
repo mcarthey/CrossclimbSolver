@@ -516,6 +516,11 @@ const CrossclimbDOM = {
     return this._bridgeCmd('ember-explore-v2', {}, 10000);
   },
 
+  // Deep Ember reorder: searches globally for owner, loads game modules, attempts service-level reorder
+  async pageEmberDeepReorder(targetWords) {
+    return this._bridgeCmd('ember-deep-reorder', { targetWords }, 15000);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {
