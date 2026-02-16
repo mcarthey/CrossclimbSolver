@@ -364,8 +364,11 @@
   }
 
   // ---- READ BOARD ORDER ----
-  // Reads the current row order by iterating DOM children (which reflects visual order
-  // after any drag-and-drop reordering) and reading input values.
+  // Reads the current row order by visual position (y-coordinate), NOT DOM order.
+  // The game may reorder rows visually via CSS transforms without moving DOM elements,
+  // so we must sort by getBoundingClientRect().top to get the true visual order.
+  // Also re-tags rows with data-cs-row in visual order so subsequent drag selectors
+  // target the correct elements.
 
   function readBoardOrder() {
     // The middle rows live inside an <ol class="crossclimb__guess__container">
@@ -376,8 +379,7 @@
     }
     if (!container) return { error: 'no container found' };
 
-    var rows = [];
-    // Iterate children in DOM order (= visual order after drag reordering)
+    var rawRows = [];
     var children = container.querySelectorAll('.crossclimb__guess--middle');
     for (var i = 0; i < children.length; i++) {
       var row = children[i];
@@ -386,10 +388,24 @@
       for (var j = 0; j < inputs.length; j++) {
         word += (inputs[j].value || '').toUpperCase();
       }
-      rows.push({
+      rawRows.push({
+        el: row,
         word: word,
-        csRow: row.getAttribute('data-cs-row') || '',
         y: Math.round(row.getBoundingClientRect().top)
+      });
+    }
+
+    // Sort by visual position (y-coordinate) — critical for correct reordering
+    rawRows.sort(function(a, b) { return a.y - b.y; });
+
+    // Re-tag rows with data-cs-row in visual order so drag selectors stay correct
+    var rows = [];
+    for (var k = 0; k < rawRows.length; k++) {
+      rawRows[k].el.setAttribute('data-cs-row', String(k));
+      rows.push({
+        word: rawRows[k].word,
+        csRow: String(k),
+        y: rawRows[k].y
       });
     }
 

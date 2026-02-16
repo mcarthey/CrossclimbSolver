@@ -64,7 +64,9 @@ const Solver = {
 
       log(`Found game board: ${board.middleRows.length} middle rows, ${board.lockedRows.length} locked rows`);
 
-      // Tag rows with data attributes so the page-context bridge can find them
+      // Tag rows with data attributes so the page-context bridge can find them.
+      // Sort middle rows by visual position (y-coordinate) to handle CSS-transformed ordering.
+      board.middleRows.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
       board.middleRows.forEach((row, i) => row.setAttribute('data-cs-row', String(i)));
       board.lockedRows.forEach((row, i) => row.setAttribute('data-cs-lock', String(i)));
 
