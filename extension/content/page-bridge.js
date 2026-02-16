@@ -2231,6 +2231,280 @@
       result.diag.sortableGroupError = e.message;
     }
 
+    // === DIAGNOSTIC DUMP (runs when Ember model reorder failed) ===
+    if (!result.reordered) {
+      result.diag.deepDump = {};
+      var dd = result.diag.deepDump;
+
+      try {
+        // --- D1: Detailed service inspection ---
+        if (owner) {
+          // Inspect ember-sortable-internal-state deeply
+          try {
+            var sis = owner.lookup('service:ember-sortable-internal-state');
+            if (sis) {
+              var sisOwn = Object.getOwnPropertyNames(sis).slice(0, 50);
+              var sisProto = Object.getOwnPropertyNames(Object.getPrototypeOf(sis) || {}).slice(0, 50);
+              var sisProto2 = Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf(sis) || {}) || {}).slice(0, 30);
+              dd.sortableState = {
+                ownProps: sisOwn,
+                proto1: sisProto,
+                proto2: sisProto2,
+              };
+              if (sis.groups) {
+                var g = sis.groups;
+                dd.sortableState.groups = {
+                  type: typeof g,
+                  constructor: g.constructor ? g.constructor.name : 'none',
+                  isMap: g instanceof Map,
+                  isSet: g instanceof Set,
+                  isArray: Array.isArray(g),
+                  hasForEach: typeof g.forEach === 'function',
+                  hasEntries: typeof g.entries === 'function',
+                  hasValues: typeof g.values === 'function',
+                  size: g.size,
+                  length: g.length,
+                  ownKeys: Object.getOwnPropertyNames(g).slice(0, 30),
+                  protoKeys: Object.getOwnPropertyNames(Object.getPrototypeOf(g) || {}).slice(0, 30),
+                  symbols: Object.getOwnPropertySymbols(g).map(function(s) { return s.toString(); }),
+                };
+                // Try Map iteration differently
+                if (g instanceof Map) {
+                  var mapKeys = [];
+                  g.forEach(function(v, k) { mapKeys.push(String(k)); });
+                  dd.sortableState.groups.mapKeys = mapKeys;
+                }
+                // Try to JSON stringify
+                try { dd.sortableState.groups.json = JSON.stringify(g).substring(0, 200); } catch (e) { dd.sortableState.groups.json = 'error: ' + e.message; }
+                // Console dump
+                console.log('[CS-DIAG] ember-sortable-internal-state.groups:', g);
+              }
+              // Check all own properties for anything useful
+              for (var sp = 0; sp < sisOwn.length; sp++) {
+                var spVal = sis[sisOwn[sp]];
+                if (spVal && typeof spVal === 'object' && spVal !== null) {
+                  dd.sortableState['prop_' + sisOwn[sp]] = {
+                    type: typeof spVal,
+                    constructor: spVal.constructor ? spVal.constructor.name : 'none',
+                    keys: Object.keys(spVal).slice(0, 20),
+                  };
+                }
+              }
+              console.log('[CS-DIAG] ember-sortable-internal-state full:', sis);
+            }
+          } catch (e) { dd.sortableStateError = e.message; }
+
+          // Inspect drag-coordinator deeply
+          try {
+            var dc = owner.lookup('service:drag-coordinator');
+            if (dc) {
+              var dcOwn = Object.getOwnPropertyNames(dc).slice(0, 50);
+              var dcProto = Object.getOwnPropertyNames(Object.getPrototypeOf(dc) || {}).slice(0, 50);
+              var dcProto2 = Object.getOwnPropertyNames(Object.getPrototypeOf(Object.getPrototypeOf(dc) || {}) || {}).slice(0, 30);
+              dd.dragCoord = {
+                ownProps: dcOwn,
+                proto1: dcProto,
+                proto2: dcProto2,
+              };
+              if (dc.sortComponents) {
+                var sc2 = dc.sortComponents;
+                dd.dragCoord.sortComponents = {
+                  type: typeof sc2,
+                  constructor: sc2.constructor ? sc2.constructor.name : 'none',
+                  isMap: sc2 instanceof Map,
+                  isSet: sc2 instanceof Set,
+                  isArray: Array.isArray(sc2),
+                  hasForEach: typeof sc2.forEach === 'function',
+                  size: sc2.size,
+                  length: sc2.length,
+                  ownKeys: Object.getOwnPropertyNames(sc2).slice(0, 30),
+                  protoKeys: Object.getOwnPropertyNames(Object.getPrototypeOf(sc2) || {}).slice(0, 30),
+                };
+                // Console dump
+                console.log('[CS-DIAG] drag-coordinator.sortComponents:', sc2);
+              }
+              console.log('[CS-DIAG] drag-coordinator full:', dc);
+            }
+          } catch (e) { dd.dragCoordError = e.message; }
+
+          // --- D2: Search container registry for game/crossclimb entries ---
+          try {
+            var regKeys = [];
+            if (owner.registrations) {
+              regKeys = Object.keys(owner.registrations).filter(function(k) {
+                return k.indexOf('crossclimb') >= 0 || k.indexOf('sortable') >= 0 ||
+                       k.indexOf('game') >= 0 || k.indexOf('drag') >= 0;
+              }).slice(0, 30);
+            }
+            var cacheKeys = [];
+            if (owner._resolveCache) {
+              cacheKeys = Object.keys(owner._resolveCache).filter(function(k) {
+                return k.indexOf('crossclimb') >= 0 || k.indexOf('sortable') >= 0 ||
+                       k.indexOf('game') >= 0 || k.indexOf('drag') >= 0;
+              }).slice(0, 30);
+            }
+            var resolvedInstances = [];
+            if (owner._resolveCache) {
+              for (var rk = 0; rk < cacheKeys.length; rk++) {
+                var inst = owner._resolveCache[cacheKeys[rk]];
+                resolvedInstances.push({
+                  key: cacheKeys[rk],
+                  type: typeof inst,
+                  constructor: inst && inst.constructor ? inst.constructor.name : 'none',
+                  hasGameState: inst && !!inst.gameState,
+                });
+              }
+            }
+            dd.registry = {
+              registrations: regKeys,
+              resolveCache: cacheKeys,
+              resolvedInstances: resolvedInstances,
+            };
+            // Also try factoryFor
+            var factoryNames = ['crossclimb', 'games-web@crossclimb', 'private/crossclimb/crossclimb-guess'];
+            dd.registry.factories = {};
+            for (var fn = 0; fn < factoryNames.length; fn++) {
+              try {
+                var factory = owner.factoryFor('component:' + factoryNames[fn]);
+                if (factory) {
+                  dd.registry.factories[factoryNames[fn]] = {
+                    found: true,
+                    hasClass: !!factory.class,
+                    classKeys: factory.class ? Object.keys(factory.class).slice(0, 20) : [],
+                    protoKeys: factory.class && factory.class.prototype ? Object.keys(factory.class.prototype).slice(0, 20) : [],
+                  };
+                }
+              } catch (e) {
+                dd.registry.factories[factoryNames[fn]] = { error: e.message };
+              }
+            }
+          } catch (e) { dd.registryError = e.message; }
+
+          // --- D3: Try to find ALL service instances in the container ---
+          try {
+            var allCacheKeys = owner._resolveCache ? Object.keys(owner._resolveCache).slice(0, 200) : [];
+            var serviceInstances = allCacheKeys.filter(function(k) { return k.indexOf('service:') === 0; });
+            dd.allServices = serviceInstances.slice(0, 50);
+            // Check each service for gameState
+            var servicesWithGameState = [];
+            for (var sk = 0; sk < serviceInstances.length; sk++) {
+              var sInst = owner._resolveCache[serviceInstances[sk]];
+              if (sInst && sInst.gameState) {
+                servicesWithGameState.push(serviceInstances[sk]);
+              }
+            }
+            dd.servicesWithGameState = servicesWithGameState;
+          } catch (e) { dd.allServicesError = e.message; }
+        }
+
+        // --- D4: DOM element __ember*/__glimmer* introspection ---
+        try {
+          var targetEls = {
+            ol: document.querySelector('.crossclimb__guess__container'),
+            grid: document.querySelector('.crossclimb__grid'),
+            wrapper: document.querySelector('.crossclimb__wrapper'),
+            firstMiddle: document.querySelector('.crossclimb__guess--middle'),
+            firstDragger: document.querySelector('.crossclimb__guess-dragger'),
+            gameWrapper: document.querySelector('.play__game__wrapper'),
+          };
+          dd.domMetadata = {};
+          for (var elName in targetEls) {
+            var el3 = targetEls[elName];
+            if (!el3) { dd.domMetadata[elName] = { found: false }; continue; }
+            var allKeys3 = Object.getOwnPropertyNames(el3).filter(function(k) {
+              return k.indexOf('__') === 0;
+            }).slice(0, 30);
+            var emberGlimmerKeys = allKeys3.filter(function(k) {
+              return k.indexOf('ember') >= 0 || k.indexOf('glimmer') >= 0;
+            });
+            dd.domMetadata[elName] = {
+              found: true,
+              dunderKeys: allKeys3,
+              emberKeys: emberGlimmerKeys,
+            };
+            // For each ember/glimmer key, inspect what it points to
+            for (var egk = 0; egk < emberGlimmerKeys.length; egk++) {
+              var ref4 = el3[emberGlimmerKeys[egk]];
+              dd.domMetadata[elName]['ref_' + emberGlimmerKeys[egk]] = {
+                type: typeof ref4,
+                constructor: ref4 && ref4.constructor ? ref4.constructor.name : 'none',
+                keys: ref4 ? Object.keys(ref4).slice(0, 20) : [],
+                hasGameState: ref4 && !!ref4.gameState,
+                hasComponent: ref4 && !!ref4.component,
+                hasView: ref4 && !!ref4._view,
+                hasArgs: ref4 && !!ref4.args,
+              };
+              if (ref4) console.log('[CS-DIAG] ' + elName + '.' + emberGlimmerKeys[egk] + ':', ref4);
+            }
+            // Also check for non-dunder ember properties
+            var viewId = el3.id;
+            if (viewId && viewId.indexOf('ember') >= 0) {
+              dd.domMetadata[elName].emberId = viewId;
+            }
+          }
+        } catch (e) { dd.domMetadataError = e.message; }
+
+        // --- D5: Ember globals and devtools ---
+        try {
+          dd.globals = {
+            hasEmberInspector: !!window.__EMBER_INSPECTOR__,
+            hasDevtools: !!window.__EMBER_DEVTOOLS_GLOBAL_HOOK__,
+            hasGlimmerTracker: !!window.__GLIMMER_VALIDATOR_REGISTRATION__,
+          };
+          // Check Ember's global state
+          var Ember3 = null;
+          try { Ember3 = (requirejs('ember').default || requirejs('ember')); } catch (e) {}
+          if (Ember3) {
+            dd.globals.hasViewRegistry = !!Ember3._viewRegistry;
+            dd.globals.viewRegistryCount = Ember3._viewRegistry ? Object.keys(Ember3._viewRegistry).length : 0;
+            dd.globals.hasComponentLookup = !!Ember3.ComponentLookup;
+            dd.globals.hasViewUtils = !!Ember3.ViewUtils;
+            // If viewRegistry exists, dump components with gameState
+            if (Ember3._viewRegistry) {
+              var vrKeys = Object.keys(Ember3._viewRegistry);
+              var vrWithGS = [];
+              var vrSamples = [];
+              for (var vri = 0; vri < vrKeys.length; vri++) {
+                var vrView = Ember3._viewRegistry[vrKeys[vri]];
+                if (!vrView) continue;
+                if (vrView.gameState) vrWithGS.push(vrKeys[vri]);
+                if (vri < 5) {
+                  vrSamples.push({
+                    id: vrKeys[vri],
+                    type: typeof vrView,
+                    constructor: vrView.constructor ? vrView.constructor.name : 'none',
+                    keys: Object.keys(vrView).slice(0, 15),
+                  });
+                }
+              }
+              dd.globals.viewsWithGameState = vrWithGS;
+              dd.globals.viewSamples = vrSamples;
+            }
+          }
+        } catch (e) { dd.globalsError = e.message; }
+
+        // --- D6: Check requirejs modules for game-related singletons ---
+        try {
+          if (typeof requirejs !== 'undefined' && requirejs.entries) {
+            var moduleNames = Object.keys(requirejs.entries);
+            dd.modules = {
+              total: moduleNames.length,
+              crossclimb: moduleNames.filter(function(m) { return m.indexOf('crossclimb') >= 0; }).slice(0, 30),
+              sortable: moduleNames.filter(function(m) { return m.indexOf('sortable') >= 0; }).slice(0, 20),
+              gameState: moduleNames.filter(function(m) { return m.indexOf('game-state') >= 0 || m.indexOf('game_state') >= 0; }).slice(0, 10),
+            };
+          }
+        } catch (e) { dd.modulesError = e.message; }
+
+        // Console dump everything
+        console.log('[CS-DIAG] === FULL DIAGNOSTIC DUMP ===');
+        console.log('[CS-DIAG] deepDump:', JSON.parse(JSON.stringify(dd)));
+
+      } catch (e) {
+        dd.error = e.message;
+      }
+    }
+
     // === FINAL: DOM reorder fallback ===
     if (!result.reordered) {
       result.strategies.push('dom-reorder-fallback');
@@ -2241,5 +2515,5 @@
     window.postMessage(result, '*');
   }
 
-  console.log('[CrossclimbSolver] Page bridge v6 ready (deep Ember reorder + sortComponents/groups/gameState)');
+  console.log('[CrossclimbSolver] Page bridge v7 ready (deep diagnostics)');
 })();

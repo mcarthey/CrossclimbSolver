@@ -763,6 +763,102 @@ const Solver = {
           if (diag.sortableGroup.protoKeys?.length > 0) log(`    proto: [${diag.sortableGroup.protoKeys.join(', ')}]`);
         }
 
+        // Log deep diagnostic dump if present
+        if (diag.deepDump) {
+          const dd = diag.deepDump;
+          log('  --- DIAGNOSTIC DUMP ---');
+
+          // D1: Service internals
+          if (dd.sortableState) {
+            const ss = dd.sortableState;
+            log(`  sortable-state ownProps: [${ss.ownProps?.join(', ')}]`);
+            log(`  sortable-state proto1: [${ss.proto1?.join(', ')}]`);
+            if (ss.groups) {
+              const g = ss.groups;
+              log(`  groups: type=${g.type} constructor=${g.constructor} isMap=${g.isMap} isSet=${g.isSet} isArray=${g.isArray}`);
+              log(`  groups: size=${g.size} length=${g.length} hasForEach=${g.hasForEach} hasEntries=${g.hasEntries}`);
+              log(`  groups ownKeys: [${g.ownKeys?.join(', ')}]`);
+              log(`  groups protoKeys: [${g.protoKeys?.slice(0, 15).join(', ')}]`);
+              if (g.symbols?.length > 0) log(`  groups symbols: [${g.symbols.join(', ')}]`);
+              if (g.mapKeys) log(`  groups mapKeys: [${g.mapKeys.join(', ')}]`);
+              if (g.json) log(`  groups json: ${g.json}`);
+            }
+            // Log any inspected own properties
+            for (const [key, val] of Object.entries(ss)) {
+              if (key.startsWith('prop_')) log(`  sortable-state.${key.slice(5)}: type=${val.type} constructor=${val.constructor} keys=[${val.keys?.join(', ')}]`);
+            }
+          }
+
+          if (dd.dragCoord) {
+            const dc = dd.dragCoord;
+            log(`  drag-coord ownProps: [${dc.ownProps?.join(', ')}]`);
+            log(`  drag-coord proto1: [${dc.proto1?.join(', ')}]`);
+            if (dc.sortComponents) {
+              const sc = dc.sortComponents;
+              log(`  sortComponents: type=${sc.type} constructor=${sc.constructor} isMap=${sc.isMap} isSet=${sc.isSet} isArray=${sc.isArray}`);
+              log(`  sortComponents: size=${sc.size} length=${sc.length} hasForEach=${sc.hasForEach}`);
+              log(`  sortComponents ownKeys: [${sc.ownKeys?.join(', ')}]`);
+            }
+          }
+
+          // D2: Registry
+          if (dd.registry) {
+            if (dd.registry.registrations?.length > 0) log(`  registry entries: [${dd.registry.registrations.join(', ')}]`);
+            if (dd.registry.resolveCache?.length > 0) log(`  resolve cache: [${dd.registry.resolveCache.join(', ')}]`);
+            if (dd.registry.resolvedInstances?.length > 0) {
+              for (const ri of dd.registry.resolvedInstances) {
+                log(`  cached: ${ri.key} type=${ri.type} constructor=${ri.constructor} hasGameState=${ri.hasGameState}`);
+              }
+            }
+            if (dd.registry.factories) {
+              for (const [name, f] of Object.entries(dd.registry.factories)) {
+                if (f.found) log(`  factory ${name}: hasClass=${f.hasClass} proto=[${f.protoKeys?.join(', ')}]`);
+                else if (f.error) log(`  factory ${name}: error=${f.error}`);
+              }
+            }
+          }
+
+          // D3: All services
+          if (dd.allServices?.length > 0) log(`  all cached services (${dd.allServices.length}): [${dd.allServices.slice(0, 20).join(', ')}]`);
+          if (dd.servicesWithGameState?.length > 0) log(`  SERVICES WITH gameState: [${dd.servicesWithGameState.join(', ')}]`);
+
+          // D4: DOM metadata
+          if (dd.domMetadata) {
+            for (const [elName, info] of Object.entries(dd.domMetadata)) {
+              if (!info.found) continue;
+              log(`  ${elName}: dunderKeys=[${info.dunderKeys?.join(', ')}] emberKeys=[${info.emberKeys?.join(', ')}]`);
+              for (const [refKey, refVal] of Object.entries(info)) {
+                if (refKey.startsWith('ref_')) {
+                  log(`    ${refKey}: type=${refVal.type} constructor=${refVal.constructor} keys=[${refVal.keys?.slice(0, 10).join(', ')}] gameState=${refVal.hasGameState} component=${refVal.hasComponent}`);
+                }
+              }
+            }
+          }
+
+          // D5: Globals
+          if (dd.globals) {
+            const g = dd.globals;
+            log(`  viewRegistry: exists=${g.hasViewRegistry} count=${g.viewRegistryCount}`);
+            if (g.viewsWithGameState?.length > 0) log(`  viewRegistry components with gameState: [${g.viewsWithGameState.join(', ')}]`);
+            if (g.viewSamples?.length > 0) {
+              for (const vs of g.viewSamples) {
+                log(`  viewSample: id=${vs.id} constructor=${vs.constructor} keys=[${vs.keys?.join(', ')}]`);
+              }
+            }
+          }
+
+          // D6: Modules
+          if (dd.modules) {
+            log(`  requirejs modules: ${dd.modules.total} total`);
+            if (dd.modules.crossclimb?.length > 0) log(`  crossclimb modules: [${dd.modules.crossclimb.join(', ')}]`);
+            if (dd.modules.sortable?.length > 0) log(`  sortable modules: [${dd.modules.sortable.join(', ')}]`);
+            if (dd.modules.gameState?.length > 0) log(`  game-state modules: [${dd.modules.gameState.join(', ')}]`);
+          }
+
+          log('  --- END DIAGNOSTIC DUMP ---');
+          log('  (Full dump also in browser console: F12 → Console, search "[CS-DIAG]")');
+        }
+
         if (deepResult.reordered) {
           await CrossclimbDOM.sleep(1000);
           current = await readOrder();
