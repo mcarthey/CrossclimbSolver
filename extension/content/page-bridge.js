@@ -84,6 +84,10 @@
           emberExploreV2(result);
           break;
 
+        case 'ember-deep-reorder':
+          emberDeepReorderAsync(d.targetWords, result);
+          return; // ack sent async
+
         default:
           result.ok = false;
           result.error = 'unknown action: ' + d.action;
@@ -1523,5 +1527,358 @@
     return Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top);
   }
 
-  console.log('[CrossclimbSolver] Page bridge v4 ready (capture bypass + HTML5 DnD + Ember v2)');
+  // ---- EMBER DEEP REORDER (V3) ----
+  // Comprehensive approach: loads Ember via requirejs to access internal registries,
+  // searches ALL DOM elements globally for metadata, loads game-state module directly,
+  // and attempts to find the Ember owner/container to look up services and reorder.
+
+  function emberDeepReorderAsync(targetWords, result) {
+    result.strategies = [];
+    result.diag = {};
+
+    if (typeof requirejs === 'undefined') {
+      result.error = 'requirejs not available';
+      reorderDOM(targetWords, result);
+      window.postMessage(result, '*');
+      return;
+    }
+
+    // Load Ember utilities
+    var getOwner = null;
+    var emberRun = null;
+    var emberSet = null;
+    var notifyProp = null;
+
+    try { getOwner = requirejs('@ember/application').getOwner; } catch (e) {}
+    try { emberRun = requirejs('@ember/runloop').run; } catch (e) {}
+    try {
+      var eObj = requirejs('@ember/object');
+      emberSet = eObj.set;
+      notifyProp = eObj.notifyPropertyChange;
+    } catch (e) {}
+
+    var owner = null;
+
+    // --- A1: Load full ember module, check NAMESPACES ---
+    try {
+      var emberMod = requirejs('ember');
+      var Ember = emberMod.default || emberMod;
+      if (Ember) {
+        result.diag.emberVersion = Ember.VERSION || '(stripped)';
+        // Namespace.NAMESPACES contains all running app instances
+        var ns = (Ember.Namespace && Ember.Namespace.NAMESPACES) || [];
+        result.diag.namespaceCount = ns.length;
+        for (var ni = 0; ni < ns.length && !owner; ni++) {
+          if (ns[ni].__container__) {
+            owner = ns[ni].__container__;
+            result.strategies.push('owner-via-namespace-' + ni);
+          }
+          // Also try __deprecatedInstance__
+          if (!owner && ns[ni].__deprecatedInstance__) {
+            owner = ns[ni].__deprecatedInstance__;
+            result.strategies.push('owner-via-deprecatedInstance-' + ni);
+          }
+        }
+        // Application.NAMESPACES
+        var appNs = (Ember.Application && Ember.Application.NAMESPACES) || [];
+        result.diag.appNamespaceCount = appNs.length;
+        for (var an = 0; an < appNs.length && !owner; an++) {
+          if (appNs[an].__container__) {
+            owner = appNs[an].__container__;
+            result.strategies.push('owner-via-app-namespace-' + an);
+          }
+        }
+        // _viewRegistry
+        if (Ember._viewRegistry) {
+          var viewIds = Object.keys(Ember._viewRegistry);
+          result.diag.viewRegistryCount = viewIds.length;
+          for (var vr = 0; vr < Math.min(viewIds.length, 50) && !owner; vr++) {
+            var view = Ember._viewRegistry[viewIds[vr]];
+            if (view && getOwner) {
+              try {
+                owner = getOwner(view);
+                if (owner) result.strategies.push('owner-via-viewRegistry');
+              } catch (e) {}
+            }
+          }
+        }
+      }
+    } catch (e) {
+      result.diag.emberLoadError = e.message;
+    }
+
+    // --- A2: Search ALL .ember-view elements globally for __ember* metadata ---
+    if (!owner) {
+      var views = document.querySelectorAll('.ember-view');
+      result.diag.globalEmberViews = views.length;
+      var metaFound = 0;
+      for (var vi = 0; vi < views.length && !owner; vi++) {
+        var eKeys = Object.keys(views[vi]).filter(function(k) {
+          return k.indexOf('__ember') === 0 || k.indexOf('__glimmer') === 0;
+        });
+        if (eKeys.length > 0) {
+          metaFound++;
+          if (metaFound <= 3) result.strategies.push('meta-on-view-' + vi + ': ' + eKeys.join(','));
+          for (var eki = 0; eki < eKeys.length && !owner; eki++) {
+            var ref = views[vi][eKeys[eki]];
+            if (!ref) continue;
+            var paths = [ref, ref._view, ref.component];
+            for (var pi = 0; pi < paths.length && !owner; pi++) {
+              if (paths[pi] && getOwner) {
+                try {
+                  owner = getOwner(paths[pi]);
+                  if (owner) result.strategies.push('owner-via-view-meta');
+                } catch (e) {}
+              }
+            }
+          }
+        }
+      }
+      result.diag.viewsWithMeta = metaFound;
+    }
+
+    // --- A3: Search broader set of elements for __ember* metadata ---
+    if (!owner) {
+      // Check common structural elements that Ember might attach metadata to
+      var candidates = document.querySelectorAll(
+        '#ember-application, #ember-testing, [id^="ember"], .ember-application, ' +
+        '.crossclimb__wrapper, .crossclimb__grid, .crossclimb__guess__container, ' +
+        '.crossclimb__guess--middle, .crossclimb__guess-dragger'
+      );
+      result.diag.candidateElements = candidates.length;
+      var broadMeta = 0;
+      for (var ci = 0; ci < candidates.length && !owner; ci++) {
+        var cKeys = Object.keys(candidates[ci]).filter(function(k) {
+          return k.indexOf('__ember') === 0 || k.indexOf('__glimmer') === 0;
+        });
+        if (cKeys.length > 0) {
+          broadMeta++;
+          result.strategies.push('meta-on-' + candidates[ci].tagName + '.' + (candidates[ci].className || '').toString().substring(0, 30));
+          for (var cki = 0; cki < cKeys.length && !owner; cki++) {
+            var cRef = candidates[ci][cKeys[cki]];
+            if (cRef && getOwner) {
+              try {
+                var paths2 = [cRef, cRef._view, cRef.component];
+                for (var p2 = 0; p2 < paths2.length; p2++) {
+                  if (paths2[p2]) { owner = getOwner(paths2[p2]); if (owner) break; }
+                }
+                if (owner) result.strategies.push('owner-via-candidate-meta');
+              } catch (e) {}
+            }
+          }
+        }
+      }
+      result.diag.candidatesWithMeta = broadMeta;
+    }
+
+    // --- A4: Try app module for __container__ ---
+    if (!owner) {
+      try {
+        var appMod = requirejs('voyager-web/app');
+        var AppClass = appMod.default || appMod;
+        if (AppClass) {
+          var appProps = ['__container__', '__registry__', '__deprecatedInstance__',
+                          '_container', '_registry', 'container', 'registry'];
+          for (var ap = 0; ap < appProps.length; ap++) {
+            if (AppClass[appProps[ap]]) {
+              result.strategies.push('app-has-' + appProps[ap]);
+              if (appProps[ap].indexOf('container') >= 0 || appProps[ap].indexOf('Instance') >= 0) {
+                owner = AppClass[appProps[ap]];
+                result.strategies.push('owner-from-app');
+                break;
+              }
+            }
+          }
+          if (!owner) {
+            // List app class keys for debugging
+            result.diag.appClassKeys = Object.keys(AppClass).filter(function(k) {
+              return k.indexOf('_') === 0 || k.indexOf('container') >= 0 || k.indexOf('instance') >= 0;
+            }).slice(0, 20);
+          }
+        }
+      } catch (e) {
+        result.strategies.push('app-error: ' + e.message);
+      }
+    }
+
+    // === USE OWNER TO LOOK UP SERVICES ===
+    if (owner) {
+      result.ownerFound = true;
+      result.lookups = {};
+
+      var lookupNames = [
+        'service:ember-sortable-internal-state',
+        'service:drag-coordinator',
+        'component:crossclimb',
+        'component:games-web@crossclimb',
+        'component:private/crossclimb/crossclimb-guess'
+      ];
+
+      for (var ln = 0; ln < lookupNames.length; ln++) {
+        try {
+          var svc = owner.lookup(lookupNames[ln]);
+          if (svc) {
+            var svcKeys = Object.keys(svc).slice(0, 40);
+            result.lookups[lookupNames[ln]] = { found: true, keys: svcKeys };
+
+            // If it's ember-sortable internal state, look for groups/items
+            if (lookupNames[ln] === 'service:ember-sortable-internal-state' && svc.groups) {
+              result.strategies.push('sortable-state-has-groups');
+              try {
+                var groups = svc.groups;
+                result.lookups[lookupNames[ln]].groupCount = groups.length || Object.keys(groups).length;
+              } catch (e) {}
+            }
+
+            // If it's drag-coordinator, look for sortable component
+            if (lookupNames[ln] === 'service:drag-coordinator') {
+              result.strategies.push('drag-coord-found');
+              if (svc.sortComponentController) {
+                result.strategies.push('drag-coord-has-sortComponent');
+                try {
+                  var sortComp = svc.sortComponentController;
+                  result.lookups[lookupNames[ln]].sortCompKeys = Object.keys(sortComp).slice(0, 30);
+                  // Check if it has a sortableObjectList
+                  if (sortComp.sortableObjectList) {
+                    var objList = sortComp.sortableObjectList;
+                    var listArr = objList.toArray ? objList.toArray() : (Array.isArray(objList) ? objList : null);
+                    if (listArr) {
+                      result.strategies.push('sortableObjectList-len=' + listArr.length);
+                      // Try to reorder!
+                      var wordMap = {};
+                      for (var oi = 0; oi < listArr.length; oi++) {
+                        var item = listArr[oi];
+                        var word = '';
+                        if (typeof item === 'string') word = item.toUpperCase();
+                        else if (item.get) word = (item.get('word') || item.get('answer') || item.get('text') || '').toUpperCase();
+                        else word = (item.word || item.answer || item.text || '').toUpperCase();
+                        if (word) wordMap[word] = item;
+                        result.strategies.push('item-' + oi + ': ' + word);
+                      }
+                      var newOrder = [];
+                      for (var tw = 0; tw < targetWords.length; tw++) {
+                        if (wordMap[targetWords[tw]]) newOrder.push(wordMap[targetWords[tw]]);
+                      }
+                      if (newOrder.length === listArr.length) {
+                        try {
+                          if (emberRun) {
+                            emberRun(function() {
+                              if (objList.replace) {
+                                objList.replace(0, objList.length || objList.get('length'), newOrder);
+                                result.strategies.push('reordered-via-sortableObjectList');
+                                result.reordered = true;
+                              } else if (emberSet && sortComp) {
+                                emberSet(sortComp, 'sortableObjectList', newOrder);
+                                result.strategies.push('reordered-via-set-sortableObjectList');
+                                result.reordered = true;
+                              }
+                            });
+                          }
+                        } catch (e) {
+                          result.strategies.push('reorder-error: ' + e.message);
+                        }
+                      }
+                    }
+                  }
+                } catch (e) {
+                  result.strategies.push('sortComp-error: ' + e.message);
+                }
+              }
+            }
+          } else {
+            result.lookups[lookupNames[ln]] = { found: false };
+          }
+        } catch (e) {
+          result.lookups[lookupNames[ln]] = { error: e.message };
+        }
+      }
+    } else {
+      result.ownerFound = false;
+    }
+
+    // === B: Inspect game-state module ===
+    try {
+      var gs = requirejs('games-web/utils/crossclimb/game-state');
+      result.diag.gameState = {
+        keys: Object.keys(gs).slice(0, 20),
+        defaultType: gs.default ? typeof gs.default : 'none'
+      };
+      if (gs.default) {
+        if (typeof gs.default === 'function') {
+          result.diag.gameState.isFunction = true;
+          if (gs.default.prototype) {
+            result.diag.gameState.protoKeys = Object.keys(gs.default.prototype).slice(0, 30);
+          }
+          // Check for static properties
+          result.diag.gameState.staticKeys = Object.getOwnPropertyNames(gs.default).filter(function(k) {
+            return k !== 'prototype' && k !== 'length' && k !== 'name';
+          }).slice(0, 20);
+        } else {
+          result.diag.gameState.objectKeys = Object.keys(gs.default).slice(0, 30);
+        }
+      }
+      // Named exports (non-default)
+      var namedExports = Object.keys(gs).filter(function(k) { return k !== 'default' && k !== '__esModule'; });
+      if (namedExports.length > 0) {
+        result.diag.gameState.namedExports = {};
+        for (var ne = 0; ne < namedExports.length; ne++) {
+          result.diag.gameState.namedExports[namedExports[ne]] = typeof gs[namedExports[ne]];
+        }
+      }
+    } catch (e) {
+      result.diag.gameStateError = e.message;
+    }
+
+    // === C: Inspect crossclimb component module ===
+    try {
+      var cc = requirejs('games-web/components/crossclimb');
+      result.diag.crossclimbComp = {
+        keys: Object.keys(cc).slice(0, 20),
+        defaultType: cc.default ? typeof cc.default : 'none'
+      };
+      if (cc.default && typeof cc.default === 'function' && cc.default.prototype) {
+        result.diag.crossclimbComp.protoKeys = Object.keys(cc.default.prototype).slice(0, 30);
+      }
+    } catch (e) {
+      result.diag.crossclimbCompError = e.message;
+    }
+
+    // === D: Inspect crossclimb-guess component ===
+    try {
+      var cg = requirejs('games-web/components/private/crossclimb/crossclimb-guess');
+      result.diag.guessComp = {
+        keys: Object.keys(cg).slice(0, 20),
+        defaultType: cg.default ? typeof cg.default : 'none'
+      };
+      if (cg.default && typeof cg.default === 'function' && cg.default.prototype) {
+        result.diag.guessComp.protoKeys = Object.keys(cg.default.prototype).slice(0, 30);
+      }
+    } catch (e) {
+      result.diag.guessCompError = e.message;
+    }
+
+    // === E: Inspect sortable-group modifier ===
+    try {
+      var sg = requirejs('ember-sortable/modifiers/sortable-group');
+      result.diag.sortableGroup = {
+        keys: Object.keys(sg).slice(0, 20),
+        defaultType: sg.default ? typeof sg.default : 'none'
+      };
+      if (sg.default && typeof sg.default === 'function' && sg.default.prototype) {
+        result.diag.sortableGroup.protoKeys = Object.keys(sg.default.prototype).slice(0, 30);
+      }
+    } catch (e) {
+      result.diag.sortableGroupError = e.message;
+    }
+
+    // === FINAL: DOM reorder fallback ===
+    if (!result.reordered) {
+      result.strategies.push('dom-reorder-fallback');
+      reorderDOM(targetWords, result);
+    }
+
+    window.postMessage(result, '*');
+  }
+
+  console.log('[CrossclimbSolver] Page bridge v5 ready (deep Ember reorder)');
 })();
