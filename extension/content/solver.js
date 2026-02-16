@@ -419,7 +419,7 @@ const Solver = {
   async _reorderMiddleRows(board, correctMiddleOrder, filledAnswers, log) {
     // correctMiddleOrder is [word2, word3, word4, word5, word6] in correct ladder order
 
-    // Read actual board state via bridge (reads input values in DOM child order)
+    // Read actual board state via bridge (sorted by visual y-coordinate)
     const readOrder = async () => {
       const result = await CrossclimbDOM.pageReadOrder();
       if (!result.ok || !result.data?.rows) return null;
@@ -441,21 +441,23 @@ const Solver = {
       return;
     }
 
-    // Selection sort: for each target position, drag the correct row there
-    const MAX_PASSES = correctMiddleOrder.length + 2; // safety limit
-    for (let pass = 0; pass < MAX_PASSES; pass++) {
+    // Phase 1: Try pointer-event drag simulation
+    log('Phase 1: Attempting drag-and-drop reordering...');
+    let dragWorked = false;
+    const MAX_DRAG_ATTEMPTS = 3; // Only try a few drags before falling back
+
+    for (let pass = 0; pass < MAX_DRAG_ATTEMPTS; pass++) {
       current = await readOrder();
       if (!current) break;
 
       const words = current.map(r => r.word);
-
-      // Check if done
       if (JSON.stringify(words) === JSON.stringify(correctMiddleOrder)) {
         log('Rows in correct order!');
+        dragWorked = true;
         break;
       }
 
-      // Find the first position that's wrong
+      // Find the first wrong position
       let wrongIdx = -1;
       for (let i = 0; i < correctMiddleOrder.length; i++) {
         if (words[i] !== correctMiddleOrder[i]) {
@@ -463,7 +465,7 @@ const Solver = {
           break;
         }
       }
-      if (wrongIdx === -1) break; // all correct
+      if (wrongIdx === -1) { dragWorked = true; break; }
 
       const targetWord = correctMiddleOrder[wrongIdx];
       const sourceIdx = words.indexOf(targetWord);
@@ -473,28 +475,56 @@ const Solver = {
       }
 
       log(`Moving "${targetWord}" from position ${sourceIdx} to ${wrongIdx}`);
-
-      // Use data-cs-row attributes from the read-order result for selectors
       const srcCsRow = current[sourceIdx].csRow;
       const tgtCsRow = current[wrongIdx].csRow;
 
-      // Drag the source row's dragger to the target row's dragger
+      // Try dragging the dragger handles
       const srcSel = `[data-cs-row="${srcCsRow}"] .crossclimb__guess-dragger`;
       const tgtSel = `[data-cs-row="${tgtCsRow}"] .crossclimb__guess-dragger`;
-
       const dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
-      log(`  Drag: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
+      log(`  Drag dragger: ok=${dragResult.ok}${dragResult.error ? ' err=' + dragResult.error : ''}`);
 
       if (!dragResult.ok) {
         // Try dragging the row itself
-        const srcSel2 = `[data-cs-row="${srcCsRow}"]`;
-        const tgtSel2 = `[data-cs-row="${tgtCsRow}"]`;
-        const dragResult2 = await CrossclimbDOM.pageDrag(srcSel2, tgtSel2);
-        log(`  Drag row fallback: ok=${dragResult2.ok}`);
+        const dragResult2 = await CrossclimbDOM.pageDrag(
+          `[data-cs-row="${srcCsRow}"]`, `[data-cs-row="${tgtCsRow}"]`
+        );
+        log(`  Drag row: ok=${dragResult2.ok}`);
       }
 
-      // Wait for drag animation to complete and DOM to settle
       await CrossclimbDOM.sleep(1200);
+
+      // Check if the drag actually changed anything
+      const afterDrag = await readOrder();
+      if (afterDrag) {
+        const afterWords = afterDrag.map(r => r.word);
+        if (JSON.stringify(afterWords) === JSON.stringify(words)) {
+          log('  Drag had no effect — game ignored synthetic events');
+          break; // Stop trying drags, fall through to DOM reorder
+        }
+        log(`  After drag: ${afterWords.join(' → ')}`);
+      }
+    }
+
+    // Phase 2: If drag didn't work, use direct DOM reorder
+    if (!dragWorked) {
+      const checkCurrent = await readOrder();
+      if (checkCurrent) {
+        const checkWords = checkCurrent.map(r => r.word);
+        if (JSON.stringify(checkWords) !== JSON.stringify(correctMiddleOrder)) {
+          log('Phase 2: Drag failed, using direct DOM reorder...');
+          const reorderResult = await CrossclimbDOM.pageReorderDOM(correctMiddleOrder);
+          log(`  DOM reorder: ok=${reorderResult.ok} moved=${reorderResult.reordered || 0}${reorderResult.error ? ' err=' + reorderResult.error : ''}`);
+          if (reorderResult.emberViewKeys) {
+            log(`  Ember keys on container: ${reorderResult.emberViewKeys.join(', ') || 'none'}`);
+          }
+          if (reorderResult.parentEmberKeys) {
+            log(`  Ember keys on parent: ${reorderResult.parentEmberKeys.join(', ') || 'none'}`);
+          }
+
+          await CrossclimbDOM.sleep(1000);
+        }
+      }
     }
 
     // Final verification
@@ -505,7 +535,8 @@ const Solver = {
       if (JSON.stringify(finalWords) === JSON.stringify(correctMiddleOrder)) {
         log('Reordering successful!');
       } else {
-        log('WARNING: Final order does not match target');
+        log('WARNING: Final order does not match target. Manual reorder may be needed.');
+        log(`Expected: ${correctMiddleOrder.join(' → ')}`);
       }
     }
   },
