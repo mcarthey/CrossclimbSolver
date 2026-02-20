@@ -575,6 +575,9 @@ const Solver = {
       log(`  Moving via ${label}...`);
       let dragResult;
       switch (method) {
+        case 'debugger':
+          dragResult = await CrossclimbDOM.debuggerDragSelectors(srcSel, tgtSel);
+          break;
         case 'pointer':
           dragResult = await CrossclimbDOM.pageDrag(srcSel, tgtSel);
           break;
@@ -590,7 +593,7 @@ const Solver = {
         default:
           return false;
       }
-      log(`  ${label}: ok=${dragResult.ok}${dragResult.captureAttempted ? ' captureBypass=yes' : ''}${dragResult.html5Completed ? ' html5=complete' : ''}${dragResult.error ? ' err=' + dragResult.error : ''}`);
+      log(`  ${label}: ok=${dragResult.ok}${dragResult.dragged ? ' trusted=yes' : ''}${dragResult.captureAttempted ? ' captureBypass=yes' : ''}${dragResult.html5Completed ? ' html5=complete' : ''}${dragResult.error ? ' err=' + dragResult.error : ''}`);
       await CrossclimbDOM.sleep(800);
 
       const after = await readOrder();
@@ -611,15 +614,16 @@ const Solver = {
     };
 
     // Helper: try multiple drags with a given method until correct
-    const tryFullReorder = async (method, label) => {
+    const tryFullReorder = async (method, label, selectorFn) => {
       for (let pass = 0; pass < 6; pass++) {
         current = await readOrder();
         if (!current || isCorrect(current)) return isCorrect(current);
         const swap = findSwap(current);
         if (!swap) return true; // already correct
         const beforeWords = current.map(r => r.word);
+        const { src, tgt } = selectorFn ? selectorFn(swap) : { src: swap.srcHandle, tgt: swap.tgtHandle };
         log(`  [${label} pass ${pass + 1}] "${swap.word}" pos ${swap.sourceIdx}→${swap.wrongIdx}`);
-        const result = await tryOneDrag(method, label, swap.srcHandle, swap.tgtHandle, beforeWords);
+        const result = await tryOneDrag(method, label, src, tgt, beforeWords);
         if (result === 'complete') return true;
         if (result === 'no-effect') return false;
         // partial — continue
@@ -630,51 +634,103 @@ const Solver = {
 
     let reordered = false;
 
-    // ──── Phase 1: Pointer drag with setPointerCapture bypass ────
-    // The game's sortable library calls element.setPointerCapture() during drag start.
-    // This API silently fails for synthetic events (requires isTrusted:true).
-    // We temporarily override setPointerCapture/releasePointerCapture/hasPointerCapture
-    // so our synthetic pointer events can trigger the drag operation.
-    // We also dispatch gotpointercapture/lostpointercapture events that the browser
-    // normally sends after a successful capture.
-    log('Phase 1: Pointer drag with setPointerCapture bypass...');
+    // ──── Phase 1: Trusted drag via chrome.debugger API ────
+    // Uses Chrome DevTools Protocol Input.dispatchMouseEvent to produce
+    // isTrusted:true pointer/mouse events. These are indistinguishable from
+    // real user input and will trigger setPointerCapture, React/Ember state
+    // transitions, and all other native browser behaviors.
+    log('Phase 1: Trusted drag via chrome.debugger API...');
     {
       const swap = findSwap(current);
       if (swap) {
         const beforeWords = current.map(r => r.word);
-        const result = await tryOneDrag('capture-bypass', 'capture-bypass', swap.srcHandle, swap.tgtHandle, beforeWords);
+        // Try the sortable handle first
+        let result = await tryOneDrag('debugger', 'debugger-handle', swap.srcHandle, swap.tgtHandle, beforeWords);
         if (result === 'complete') {
           reordered = true;
         } else if (result === 'partial') {
-          reordered = await tryFullReorder('capture-bypass', 'capture-bypass');
+          reordered = await tryFullReorder('debugger', 'debugger-handle');
         } else if (result === 'no-effect') {
-          // Also try targeting the dragger class (in case data-sortable-handle selector fails)
+          // Try the .crossclimb__guess-dragger element instead
           log('  Retrying on .crossclimb__guess-dragger...');
           current = await readOrder();
           if (current && !isCorrect(current)) {
             const swap2 = findSwap(current);
             if (swap2) {
               const bw2 = current.map(r => r.word);
-              const result2 = await tryOneDrag('capture-bypass', 'capture-bypass-dragger', swap2.srcDragger, swap2.tgtDragger, bw2);
-              if (result2 === 'complete') reordered = true;
-              else if (result2 === 'partial') reordered = await tryFullReorder('capture-bypass', 'capture-bypass-dragger');
+              const result2 = await tryOneDrag('debugger', 'debugger-dragger', swap2.srcDragger, swap2.tgtDragger, bw2);
+              if (result2 === 'complete') {
+                reordered = true;
+              } else if (result2 === 'partial') {
+                reordered = await tryFullReorder('debugger', 'debugger-dragger',
+                  (s) => ({ src: s.srcDragger, tgt: s.tgtDragger }));
+              } else if (result2 === 'no-effect') {
+                // Try dragging the entire row element
+                log('  Retrying on row element...');
+                current = await readOrder();
+                if (current && !isCorrect(current)) {
+                  const swap3 = findSwap(current);
+                  if (swap3) {
+                    const bw3 = current.map(r => r.word);
+                    const result3 = await tryOneDrag('debugger', 'debugger-row', swap3.srcRow, swap3.tgtRow, bw3);
+                    if (result3 === 'complete') reordered = true;
+                    else if (result3 === 'partial') {
+                      reordered = await tryFullReorder('debugger', 'debugger-row',
+                        (s) => ({ src: s.srcRow, tgt: s.tgtRow }));
+                    }
+                  }
+                }
+              }
             }
           }
         }
       }
     }
 
-    // ──── Phase 2: HTML5 Drag and Drop ────
-    // The game has ember-drag-drop addon which uses the HTML5 DnD API
-    // (dragstart, dragenter, dragover, drop, dragend events with DataTransfer).
+    // ──── Phase 2 (fallback): Pointer drag with setPointerCapture bypass ────
+    // Kept as fallback in case debugger API is unavailable (e.g. user denies
+    // debugger permission). Uses synthetic events with monkeypatched
+    // setPointerCapture — these have isTrusted:false so they may not trigger
+    // the game's state update.
     if (!reordered) {
-      log('Phase 2: HTML5 Drag and Drop...');
+      log('Phase 2 (fallback): Pointer drag with setPointerCapture bypass...');
       current = await readOrder();
       if (current && !isCorrect(current)) {
         const swap = findSwap(current);
         if (swap) {
           const beforeWords = current.map(r => r.word);
-          // Try on handle first, then on row
+          const result = await tryOneDrag('capture-bypass', 'capture-bypass', swap.srcHandle, swap.tgtHandle, beforeWords);
+          if (result === 'complete') {
+            reordered = true;
+          } else if (result === 'partial') {
+            reordered = await tryFullReorder('capture-bypass', 'capture-bypass');
+          } else if (result === 'no-effect') {
+            log('  Retrying on .crossclimb__guess-dragger...');
+            current = await readOrder();
+            if (current && !isCorrect(current)) {
+              const swap2 = findSwap(current);
+              if (swap2) {
+                const bw2 = current.map(r => r.word);
+                const result2 = await tryOneDrag('capture-bypass', 'capture-bypass-dragger', swap2.srcDragger, swap2.tgtDragger, bw2);
+                if (result2 === 'complete') reordered = true;
+                else if (result2 === 'partial') reordered = await tryFullReorder('capture-bypass', 'capture-bypass-dragger',
+                  (s) => ({ src: s.srcDragger, tgt: s.tgtDragger }));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // ──── Phase 3 (fallback): HTML5 Drag and Drop ────
+    // Uses synthetic DragEvent/DataTransfer. Also isTrusted:false.
+    if (!reordered) {
+      log('Phase 3 (fallback): HTML5 Drag and Drop...');
+      current = await readOrder();
+      if (current && !isCorrect(current)) {
+        const swap = findSwap(current);
+        if (swap) {
+          const beforeWords = current.map(r => r.word);
           let result = await tryOneDrag('html5', 'html5-handle', swap.srcHandle, swap.tgtHandle, beforeWords);
           if (result === 'complete') {
             reordered = true;
@@ -688,7 +744,8 @@ const Solver = {
                 const bw2 = current.map(r => r.word);
                 const result2 = await tryOneDrag('html5', 'html5-row', swap2.srcRow, swap2.tgtRow, bw2);
                 if (result2 === 'complete') reordered = true;
-                else if (result2 === 'partial') reordered = await tryFullReorder('html5', 'html5-row');
+                else if (result2 === 'partial') reordered = await tryFullReorder('html5', 'html5-row',
+                  (s) => ({ src: s.srcRow, tgt: s.tgtRow }));
               }
             }
           }
@@ -696,13 +753,11 @@ const Solver = {
       }
     }
 
-    // ──── Phase 3: Deep Ember reorder ────
-    // Comprehensive approach: loads Ember via requirejs to access internal registries
-    // (NAMESPACES, _viewRegistry), searches ALL DOM elements globally for __ember*
-    // metadata, loads game-state/crossclimb modules, and attempts to find the Ember
-    // owner to look up services and reorder the model. Falls back to DOM reorder.
+    // ──── Phase 4 (fallback): Deep Ember reorder ────
+    // Loads Ember via requirejs, searches for owner, attempts service-level reorder.
+    // Falls back to DOM reorder.
     if (!reordered) {
-      log('Phase 3: Deep Ember reorder...');
+      log('Phase 4 (fallback): Deep Ember reorder...');
       current = await readOrder();
       if (current && !isCorrect(current)) {
         const deepResult = await CrossclimbDOM.pageEmberDeepReorder(correctMiddleOrder);
