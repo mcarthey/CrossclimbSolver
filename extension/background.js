@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // CrossclimbSolver - Background Service Worker
-// Handles cross-origin fetching from crossclimbanswer.io
+// Handles cross-origin fetching from crossclimbanswer.io and trusted drag via debugger API.
 // Content scripts can't fetch cross-origin, so they message us to do it.
+// The debugger API produces isTrusted:true input events that React/Ember state machines accept.
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'FETCH_ANSWERS') {
@@ -15,6 +16,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'FETCH_LATEST') {
     handleFetchLatest()
+      .then(data => sendResponse({ success: true, data }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
+  if (message.type === 'DEBUGGER_DRAG') {
+    handleDebuggerDrag(sender.tab?.id, message)
       .then(data => sendResponse({ success: true, data }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
@@ -44,6 +52,83 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 });
+
+// ----- DEBUGGER DRAG -----
+// Uses Chrome DevTools Protocol Input.dispatchMouseEvent to produce trusted
+// pointer/mouse events. These have isTrusted:true and trigger setPointerCapture,
+// React/Ember state transitions, and all other native browser behaviors.
+//
+// The sequence mirrors a real user drag:
+//   1. mousePressed at source center
+//   2. Series of mouseMoved events tracing a path to the target
+//   3. mouseReleased at target center
+
+async function handleDebuggerDrag(tabId, message) {
+  if (!tabId) throw new Error('No tab ID available');
+
+  const { startX, startY, endX, endY, steps = 20, stepDelay = 16, pauseAfterPress = 150 } = message;
+  if (typeof startX !== 'number' || typeof startY !== 'number' ||
+      typeof endX !== 'number' || typeof endY !== 'number') {
+    throw new Error('Missing coordinates: startX, startY, endX, endY required');
+  }
+
+  const debugTarget = { tabId };
+
+  // Attach debugger (user will see the "debugging" banner on first attach)
+  try {
+    await chrome.debugger.attach(debugTarget, '1.3');
+  } catch (e) {
+    // Already attached is fine
+    if (!e.message?.includes('Already attached')) {
+      throw new Error('Debugger attach failed: ' + e.message);
+    }
+  }
+
+  try {
+    // Helper to send a CDP Input.dispatchMouseEvent
+    const dispatch = (type, x, y, extra = {}) => {
+      return chrome.debugger.sendCommand(debugTarget, 'Input.dispatchMouseEvent', {
+        type,
+        x: Math.round(x),
+        y: Math.round(y),
+        button: 'left',
+        clickCount: type === 'mousePressed' ? 1 : 0,
+        pointerType: 'mouse',
+        ...extra,
+      });
+    };
+
+    // Step 1: Press at source
+    await dispatch('mousePressed', startX, startY, { buttons: 1 });
+    await sleep(pauseAfterPress);
+
+    // Step 2: Move in incremental steps with easing
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      // Ease in-out quadratic for natural movement
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const cx = startX + (endX - startX) * eased;
+      const cy = startY + (endY - startY) * eased;
+      await dispatch('mouseMoved', cx, cy, { buttons: 1 });
+      await sleep(stepDelay);
+    }
+
+    // Step 3: Release at target
+    await dispatch('mouseReleased', endX, endY);
+
+    return { dragged: true, from: { x: startX, y: startY }, to: { x: endX, y: endY } };
+
+  } finally {
+    // Always detach to remove the debugging banner
+    try {
+      await chrome.debugger.detach(debugTarget);
+    } catch { /* already detached */ }
+  }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Fetch the homepage to discover the latest puzzle number
 async function handleFetchLatest() {

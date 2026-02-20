@@ -521,6 +521,53 @@ const CrossclimbDOM = {
     return this._bridgeCmd('ember-deep-reorder', { targetWords }, 15000);
   },
 
+  // ----- DEBUGGER DRAG (trusted events via Chrome DevTools Protocol) -----
+
+  // Drag from one element to another using the chrome.debugger API, which
+  // produces isTrusted:true mouse/pointer events. The background service worker
+  // attaches the debugger, dispatches mousePressed → mouseMoved… → mouseReleased,
+  // then detaches. The elements are resolved here to viewport coordinates.
+  async debuggerDrag(sourceEl, targetEl, { steps = 20, stepDelay = 16, pauseAfterPress = 150 } = {}) {
+    const sourceRect = sourceEl.getBoundingClientRect();
+    const targetRect = targetEl.getBoundingClientRect();
+
+    const startX = sourceRect.left + sourceRect.width / 2;
+    const startY = sourceRect.top + sourceRect.height / 2;
+    const endX = targetRect.left + targetRect.width / 2;
+    const endY = targetRect.top + targetRect.height / 2;
+
+    return this.debuggerDragCoords(startX, startY, endX, endY, { steps, stepDelay, pauseAfterPress });
+  },
+
+  // Drag by raw viewport coordinates (for callers that already resolved positions)
+  async debuggerDragCoords(startX, startY, endX, endY, { steps = 20, stepDelay = 16, pauseAfterPress = 150 } = {}) {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        type: 'DEBUGGER_DRAG',
+        startX, startY, endX, endY,
+        steps, stepDelay, pauseAfterPress,
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+        } else if (response?.success) {
+          resolve({ ok: true, ...response.data });
+        } else {
+          resolve({ ok: false, error: response?.error || 'unknown error' });
+        }
+      });
+    });
+  },
+
+  // Convenience: resolve CSS selectors to elements, then do a debugger drag
+  async debuggerDragSelectors(srcSel, tgtSel, opts = {}) {
+    const srcEl = document.querySelector(srcSel);
+    const tgtEl = document.querySelector(tgtSel);
+    if (!srcEl || !tgtEl) {
+      return { ok: false, error: `Elements not found: src=${!!srcEl} tgt=${!!tgtEl}` };
+    }
+    return this.debuggerDrag(srcEl, tgtEl, opts);
+  },
+
   // ----- UTILITIES -----
 
   sleep(ms) {
